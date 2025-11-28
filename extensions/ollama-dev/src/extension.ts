@@ -897,8 +897,14 @@ class OllamaLanguageModelProvider implements vscode.Disposable {
 							if (!firstTokenReceived && (parsed.message?.content || parsed.message?.tool_calls)) {
 								firstTokenReceived = true;
 								const timeToFirstToken = Date.now() - requestStartTime;
-									this._outputChannel.appendLine(`[ollama-dev]   Time to first token: ${timeToFirstToken}ms`);
-									this._outputChannel.appendLine(`[ollama-dev]   Thinking: ${parsed.message.thinking.substring(0, 100)}${parsed.message.thinking.length > 100 ? '...' : ''}`);
+								this._outputChannel.appendLine(`[ollama-dev]   Time to first token: ${timeToFirstToken}ms`);
+							}
+
+							// Handle thinking content (for reasoning models like DeepSeek-R1)
+							if (parsed.message?.thinking) {
+								this._outputChannel.appendLine(`[ollama-dev]   Thinking: ${parsed.message.thinking.substring(0, 100)}${parsed.message.thinking.length > 100 ? '...' : ''}`);
+								progress.report(new vscode.LanguageModelThinkingPart(parsed.message.thinking));
+							}
 
 							// Handle text content
 							if (parsed.message?.content) {
