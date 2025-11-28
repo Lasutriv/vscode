@@ -1,0 +1,82 @@
+{
+	"name": "ollama-dev",
+	"displayName": "Ollama Dev (SSH Remote Provider)",
+	"description": "Development provider for remote Ollama via SSH tunnel",
+	"version": "0.0.1",
+	"publisher": "vscode",
+	"license": "MIT",
+	"private": true,
+	"engines": {
+		"vscode": "^1.100.0"
+	},
+	"enabledApiProposals": [
+		"chatProvider",
+		"languageModelThinkingPart"
+	],
+	"categories": [
+		"Other"
+	],
+	"activationEvents": [
+		"onStartupFinished"
+	],
+	"main": "./out/extension.js",
+	"contributes": {
+		"languageModels": [
+			{
+				"vendor": "ollama"
+			}
+		],
+		"commands": [
+			{
+				"command": "ollamaDev.connect",
+				"title": "Ollama: Connect to Remote"
+			},
+			{
+				"command": "ollamaDev.disconnect",
+				"title": "Ollama: Disconnect"
+			},
+			{
+				"command": "ollamaDev.reconnect",
+				"title": "Ollama: Reconnect"
+			},
+			{
+				"command": "ollamaDev.changeHost",
+				"title": "Ollama: Change Remote Host"
+			}
+		],
+		"configuration": {
+			"title": "Ollama Dev",
+			"properties": {
+				"ollamaDev.remoteHost": {
+					"type": "string",
+					"default": "",
+					"description": "SSH host for remote Ollama server (e.g., user@192.168.1.100)"
+				},
+				"ollamaDev.remotePort": {
+					"type": "number",
+					"default": 11434,
+					"description": "Port where Ollama is running on the remote server"
+				},
+				"ollamaDev.localPort": {
+					"type": "number",
+					"default": 43134,
+					"description": "Local port to forward the SSH tunnel to (default 43134 to avoid conflicts with local Ollama)"
+				},
+				"ollamaDev.sshKeyPath": {
+					"type": "string",
+					"default": "",
+					"description": "Path to SSH private key (e.g., ~/.ssh/agent). Leave empty to use default SSH key."
+				},
+				"ollamaDev.inferenceParams": {
+					"type": "object",
+					"default": {},
+					"description": "Custom inference parameters for Ollama models"
+				}
+			}
+		}
+	},
+	"scripts": {
+		"compile": "tsc -p ./",
+		"watch": "tsc -watch -p ./"
+	}
+}
