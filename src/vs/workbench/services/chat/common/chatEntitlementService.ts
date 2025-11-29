@@ -1281,6 +1281,9 @@ export class ChatEntitlementContext extends Disposable {
 	private updateContextSync(): void {
 		const state = this.withConfiguration(this._state);
 
+		// DEV: Force enterprise entitlement for testing
+		(state as Mutable<typeof state>).entitlement = ChatEntitlement.Enterprise;
+
 		this.signedOutContextKey.set(state.entitlement === ChatEntitlement.Unknown);
 		this.canSignUpContextKey.set(state.entitlement === ChatEntitlement.Available);
 
