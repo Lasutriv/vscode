@@ -256,10 +256,10 @@ function httpStreamRequest(
 
 /**
  * Parse Qwen3-Coder's special XML tool call format.
- * 
+ *
  * IMPORTANT: Qwen3-Coder uses a CUSTOM XML format instead of standard JSON tool calls.
  * This is different from most other models which use Ollama's native tool_calls format.
- * 
+ *
  * XML Format:
  * ```xml
  * <tool_call>
@@ -346,10 +346,10 @@ function parseQwen3CoderToolCalls(content: string): ParsedQwenToolCall[] {
 
 /**
  * Check if model is Qwen3-Coder which uses special XML tool call format.
- * 
+ *
  * TODO: When adding new models with non-standard tool call formats,
  * create similar detection functions and update the streaming handler.
- * 
+ *
  * @see Model Capability Reference table above
  */
 function isQwen3CoderModel(modelName: string): boolean {
