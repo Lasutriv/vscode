@@ -1,0 +1,19 @@
+{
+	"name": "brand-icon-generator",
+	"version": "1.0.0",
+	"description": "Generate brand icons for VS Code from a single PNG source",
+	"main": "generate.js",
+	"scripts": {
+		"generate": "node generate.js",
+		"generate:summit": "node generate.js ../../resources/Summit-Tec-Clean.png ../../resources code"
+	},
+	"dependencies": {
+		"icns-lib": "^1.0.1",
+		"jimp": "^0.22.12",
+		"png-to-ico": "^2.1.8",
+		"png2icons": "^2.0.1"
+	},
+	"engines": {
+		"node": ">=16.0.0"
+	}
+}
