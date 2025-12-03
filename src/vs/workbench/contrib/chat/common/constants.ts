@@ -24,9 +24,13 @@ export enum ChatConfiguration {
 	TodosShowWidget = 'chat.tools.todos.showWidget',
 	ShowAgentSessionsViewDescription = 'chat.showAgentSessionsViewDescription',
 	NotifyWindowOnResponseReceived = 'chat.notifyWindowOnResponseReceived',
-	EmptyChatViewSessionsEnabled = 'chat.emptyState.sessions.enabled',
+	ChatViewRecentSessionsEnabled = 'chat.recentSessions.enabled',
+	ChatViewTitleEnabled = 'chat.viewTitle.enabled',
 	SubagentToolCustomAgents = 'chat.customAgentInSubagent.enabled',
 	ShowCodeBlockProgressAnimation = 'chat.agent.codeBlockProgress',
+	RestoreLastPanelSession = 'chat.restoreLastPanelSession',
+	ExitAfterDelegation = 'chat.exitAfterDelegation',
+	SuspendThrottling = 'chat.suspendThrottling',
 }
 
 /**
