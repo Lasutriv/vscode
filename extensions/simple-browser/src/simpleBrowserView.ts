@@ -13,6 +13,42 @@ export interface ShowOptions {
 	readonly viewColumn?: vscode.ViewColumn;
 }
 
+interface ScreenshotResponse {
+	readonly type: 'screenshotResult';
+	readonly success: boolean;
+	readonly data?: string;
+	readonly error?: string;
+}
+
+interface ConsoleLogsResponse {
+	readonly type: 'consoleLogsResult';
+	readonly success: boolean;
+	readonly url: string;
+	readonly logs?: string[];
+	readonly counts?: {
+		log: number;
+		info: number;
+		warn: number;
+		error: number;
+	};
+	readonly totalCount?: number;
+	readonly error?: string;
+}
+
+export interface ConsoleCaptureResult {
+	readonly success: boolean;
+	readonly url: string;
+	readonly logs?: string[];
+	readonly counts?: {
+		log: number;
+		info: number;
+		warn: number;
+		error: number;
+	};
+	readonly totalCount?: number;
+	readonly error?: string;
+}
+
 export class SimpleBrowserView extends Disposable {
 
 	public static readonly viewType = 'simpleBrowser.view';
@@ -36,6 +72,9 @@ export class SimpleBrowserView extends Disposable {
 
 	private readonly _onDidDispose = this._register(new vscode.EventEmitter<void>());
 	public readonly onDispose = this._onDidDispose.event;
+
+	private _pendingScreenshotResolve?: (value: string | undefined) => void;
+	private _pendingConsoleLogsResolve?: (value: ConsoleCaptureResult) => void;
 
 	public static create(
 		extensionUri: vscode.Uri,
@@ -80,6 +119,53 @@ export class SimpleBrowserView extends Disposable {
 						// Noop
 					}
 					break;
+				case 'screenshotResult':
+					{
+						const response = e as ScreenshotResponse;
+						if (this._pendingScreenshotResolve) {
+							this._pendingScreenshotResolve(response.success ? response.data : undefined);
+							this._pendingScreenshotResolve = undefined;
+						}
+					}
+					break;
+				case 'printResult':
+					{
+						if (!e.success && e.error === 'cross-origin') {
+							vscode.window.showWarningMessage(
+								vscode.l10n.t("Cannot print cross-origin content. Please use the browser's built-in print function on the original page.")
+							);
+						}
+					}
+					break;
+				case 'devToolsResult':
+					{
+						if (e.accessible) {
+							vscode.window.showInformationMessage(
+								vscode.l10n.t("DevTools info logged to console (View > Developer Tools > Console)")
+							);
+						} else {
+							vscode.window.showWarningMessage(
+								vscode.l10n.t("Cannot access iframe content due to cross-origin restrictions.\n\nTo inspect this page:\n1. Copy the URL from the address bar\n2. Open in external browser\n3. Use browser DevTools (F12)")
+							);
+						}
+					}
+					break;
+				case 'consoleLogsResult':
+					{
+						const response = e as ConsoleLogsResponse;
+						if (this._pendingConsoleLogsResolve) {
+							this._pendingConsoleLogsResolve({
+								success: response.success,
+								url: response.url,
+								logs: response.logs,
+								counts: response.counts,
+								totalCount: response.totalCount,
+								error: response.error
+							});
+							this._pendingConsoleLogsResolve = undefined;
+						}
+					}
+					break;
 			}
 		}));
 
@@ -108,6 +194,64 @@ export class SimpleBrowserView extends Disposable {
 	public show(url: string, options?: ShowOptions) {
 		this._webviewPanel.webview.html = this.getHtml(url);
 		this._webviewPanel.reveal(options?.viewColumn, options?.preserveFocus);
+	}
+
+	// Screenshot Page
+	public async screenshotPage(): Promise<string | undefined> {
+		return new Promise((resolve) => {
+			this._pendingScreenshotResolve = resolve;
+
+			// Set a timeout in case the webview doesn't respond
+			setTimeout(() => {
+				if (this._pendingScreenshotResolve) {
+					this._pendingScreenshotResolve(undefined);
+					this._pendingScreenshotResolve = undefined;
+				}
+			}, 10000);
+
+			this._webviewPanel.webview.postMessage({ type: 'requestScreenshot' });
+		});
+	}
+
+	// Zoom
+	public zoom(direction: 'in' | 'out' | 'reset'): void {
+		this._webviewPanel.webview.postMessage({ type: 'zoom', direction });
+	}
+
+	// Print Page
+	public printPage(): void {
+		this._webviewPanel.webview.postMessage({ type: 'printPage' });
+	}
+
+	// Toggle DevTools
+	public toggleDevTools(): void {
+		this._webviewPanel.webview.postMessage({ type: 'toggleDevTools' });
+	}
+
+	// Page Search
+	public pageSearch(): void {
+		this._webviewPanel.webview.postMessage({ type: 'pageSearch' });
+	}
+
+	// Capture Console Logs (webview fallback)
+	public async captureConsoleLogs(): Promise<ConsoleCaptureResult> {
+		return new Promise((resolve) => {
+			this._pendingConsoleLogsResolve = resolve;
+
+			// Set a timeout in case the webview doesn't respond
+			setTimeout(() => {
+				if (this._pendingConsoleLogsResolve) {
+					this._pendingConsoleLogsResolve({
+						success: false,
+						url: '',
+						error: 'timeout'
+					});
+					this._pendingConsoleLogsResolve = undefined;
+				}
+			}, 5000);
+
+			this._webviewPanel.webview.postMessage({ type: 'captureConsole' });
+		});
 	}
 
 	private getHtml(url: string) {

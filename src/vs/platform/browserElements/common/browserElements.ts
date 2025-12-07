@@ -15,6 +15,23 @@ export interface IElementData {
 	readonly bounds: IRectangle;
 }
 
+export interface IConsoleLogEntry {
+	readonly type: 'log' | 'info' | 'warn' | 'error' | 'debug';
+	readonly timestamp: number;
+	readonly message: string;
+	readonly stackTrace?: string;
+	readonly url?: string;
+	readonly lineNumber?: number;
+	readonly columnNumber?: number;
+}
+
+export interface IConsoleLogsResult {
+	readonly success: boolean;
+	readonly url: string;
+	readonly logs: IConsoleLogEntry[];
+	readonly error?: string;
+}
+
 export enum BrowserType {
 	SimpleBrowser = 'simpleBrowser',
 	LiveServer = 'liveServer',
@@ -31,4 +48,6 @@ export interface INativeBrowserElementsService {
 	getElementData(rect: IRectangle, token: CancellationToken, browserType: BrowserType, cancellationId?: number): Promise<IElementData | undefined>;
 
 	startDebugSession(token: CancellationToken, browserType: BrowserType, cancelAndDetachId?: number): Promise<void>;
+
+	getConsoleLogs(token: CancellationToken, browserType: BrowserType, durationMs?: number): Promise<IConsoleLogsResult>;
 }

@@ -40,8 +40,111 @@
         "command": "simpleBrowser.show",
         "title": "Show",
         "category": "Simple Browser"
+      },
+      {
+        "command": "simpleBrowser.screenshotPage",
+        "title": "%command.screenshotPage%",
+        "category": "Simple Browser",
+        "icon": "$(device-camera)"
+      },
+      {
+        "command": "simpleBrowser.screenshotEditor",
+        "title": "%command.screenshotEditor%",
+        "category": "Simple Browser",
+        "icon": "$(window)"
+      },
+      {
+        "command": "simpleBrowser.zoomIn",
+        "title": "%command.zoomIn%",
+        "category": "Simple Browser",
+        "icon": "$(zoom-in)"
+      },
+      {
+        "command": "simpleBrowser.zoomOut",
+        "title": "%command.zoomOut%",
+        "category": "Simple Browser",
+        "icon": "$(zoom-out)"
+      },
+      {
+        "command": "simpleBrowser.zoomReset",
+        "title": "%command.zoomReset%",
+        "category": "Simple Browser",
+        "icon": "$(screen-normal)"
+      },
+      {
+        "command": "simpleBrowser.printPage",
+        "title": "%command.printPage%",
+        "category": "Simple Browser",
+        "icon": "$(output)"
+      },
+      {
+        "command": "simpleBrowser.toggleDevTools",
+        "title": "%command.toggleDevTools%",
+        "category": "Simple Browser",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "simpleBrowser.pageSearch",
+        "title": "%command.pageSearch%",
+        "category": "Simple Browser",
+        "icon": "$(search)"
+      },
+      {
+        "command": "simpleBrowser.captureConsole",
+        "title": "%command.captureConsole%",
+        "category": "Simple Browser",
+        "icon": "$(terminal)"
       }
     ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "simpleBrowser.zoomIn",
+          "when": "activeWebviewPanelId == 'simpleBrowser.view'",
+          "group": "navigation@1"
+        },
+        {
+          "command": "simpleBrowser.zoomOut",
+          "when": "activeWebviewPanelId == 'simpleBrowser.view'",
+          "group": "navigation@2"
+        },
+        {
+          "command": "simpleBrowser.zoomReset",
+          "when": "activeWebviewPanelId == 'simpleBrowser.view'",
+          "group": "navigation@3"
+        },
+        {
+          "command": "simpleBrowser.pageSearch",
+          "when": "activeWebviewPanelId == 'simpleBrowser.view'",
+          "group": "navigation@4"
+        },
+        {
+          "command": "simpleBrowser.screenshotPage",
+          "when": "activeWebviewPanelId == 'simpleBrowser.view'",
+          "group": "navigation@5"
+        },
+        {
+          "command": "simpleBrowser.screenshotEditor",
+          "when": "activeWebviewPanelId == 'simpleBrowser.view'",
+          "group": "navigation@6"
+        },
+        {
+          "command": "simpleBrowser.printPage",
+          "when": "activeWebviewPanelId == 'simpleBrowser.view'",
+          "group": "navigation@7"
+        },
+        {
+          "command": "simpleBrowser.toggleDevTools",
+          "when": "activeWebviewPanelId == 'simpleBrowser.view'",
+          "group": "navigation@7"
+        },
+        {
+          "command": "simpleBrowser.captureConsole",
+          "when": "activeWebviewPanelId == 'simpleBrowser.view'",
+          "group": "navigation@8"
+        }
+      ]
+    },
     "configuration": [
       {
         "title": "Simple Browser",

@@ -17,10 +17,10 @@ import { KeyCode, KeyMod } from '../../../../../base/common/keyCodes.js';
 import { Disposable, DisposableStore, markAsSingleton } from '../../../../../base/common/lifecycle.js';
 import { MarshalledId } from '../../../../../base/common/marshallingIds.js';
 import { language } from '../../../../../base/common/platform.js';
-import { basename, isEqual } from '../../../../../base/common/resources.js';
+import { basename, isEqual, joinPath } from '../../../../../base/common/resources.js';
 import { ThemeIcon } from '../../../../../base/common/themables.js';
 import { hasKey } from '../../../../../base/common/types.js';
-import { URI } from '../../../../../base/common/uri.js';
+import { URI, UriComponents } from '../../../../../base/common/uri.js';
 import { ICodeEditor } from '../../../../../editor/browser/editorBrowser.js';
 import { EditorAction2 } from '../../../../../editor/browser/editorExtensions.js';
 import { IRange } from '../../../../../editor/common/core/range.js';
@@ -34,6 +34,7 @@ import { IConfigurationService } from '../../../../../platform/configuration/com
 import { ContextKeyExpr, IContextKeyService } from '../../../../../platform/contextkey/common/contextkey.js';
 import { IsLinuxContext, IsWindowsContext } from '../../../../../platform/contextkey/common/contextkeys.js';
 import { IDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
+import { IEnvironmentService } from '../../../../../platform/environment/common/environment.js';
 import { IFileService } from '../../../../../platform/files/common/files.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../../platform/instantiation/common/instantiation.js';
 import { KeybindingWeight } from '../../../../../platform/keybinding/common/keybindingsRegistry.js';
@@ -76,8 +77,10 @@ import { IChatEditorOptions } from '../chatEditor.js';
 import { ChatEditorInput, showClearEditingSessionConfirmation } from '../chatEditorInput.js';
 import { ChatViewPane } from '../chatViewPane.js';
 import { convertBufferToScreenshotVariable } from '../contrib/screenshot.js';
+import { createFileForMedia } from '../imageUtils.js';
 import { clearChatEditor } from './chatClear.js';
 import { IMarshalledChatSessionContext } from './chatSessionActions.js';
+import type { IConsoleLogsResult } from '../../../../../platform/browserElements/common/browserElements.js';
 
 export const CHAT_CATEGORY = localize2('chat.category', 'Chat');
 
@@ -243,11 +246,30 @@ abstract class OpenChatGlobalAction extends Action2 {
 		}
 		if (opts?.attachFiles) {
 			for (const file of opts.attachFiles) {
-				const uri = file instanceof URI ? file : file.uri;
-				const range = file instanceof URI ? undefined : file.range;
+				// Handle URIs from extensions which may be serialized as plain objects
+				let uri: URI;
+				let range: IRange | undefined;
 
-				if (await fileService.exists(uri)) {
-					chatWidget.attachmentModel.addFile(uri, range);
+				if (file instanceof URI) {
+					uri = file;
+				} else if (hasKey(file, { uri: true }) && file.uri) {
+					const fileRange = hasKey(file, { range: true }) ? file.range : undefined;
+					uri = URI.isUri(file.uri) ? file.uri : URI.revive(file.uri as UriComponents);
+					range = fileRange as IRange | undefined;
+				} else if (hasKey(file, { scheme: true, path: true })) {
+					// Plain URI-like object from extension serialization
+					uri = URI.revive(file as unknown as UriComponents);
+				} else {
+					console.warn('[Chat attachFiles] Skipping invalid file entry:', file);
+					continue; // Skip invalid entries
+				}
+
+				console.log('[Chat attachFiles] Processing URI:', uri.toString(), 'scheme:', uri.scheme);
+				const exists = await fileService.exists(uri);
+				console.log('[Chat attachFiles] File exists:', exists);
+				if (exists) {
+					await chatWidget.attachmentModel.addFile(uri, range);
+					console.log('[Chat attachFiles] File added to attachment model');
 				}
 			}
 		}
@@ -1874,5 +1896,212 @@ registerAction2(class ToggleChatViewTitleAction extends Action2 {
 
 		const chatViewTitleEnabled = configurationService.getValue<boolean>(ChatConfiguration.ChatViewTitleEnabled);
 		await configurationService.updateValue(ChatConfiguration.ChatViewTitleEnabled, !chatViewTitleEnabled);
+	}
+});
+
+// --- Simple Browser Screenshot to Chat
+registerAction2(class SimpleBrowserScreenshotToChatAction extends Action2 {
+	constructor() {
+		super({
+			id: 'simpleBrowser.screenshotToChat',
+			title: localize2('simpleBrowser.screenshotToChat', "Screenshot Simple Browser to Chat"),
+			f1: false, // Not in command palette, called by extension
+			category: CHAT_CATEGORY,
+		});
+	}
+
+	async run(accessor: ServicesAccessor, options?: { browserOnly?: boolean }): Promise<boolean> {
+		const hostService = accessor.get(IHostService);
+		const chatWidgetService = accessor.get(IChatWidgetService);
+		const fileService = accessor.get(IFileService);
+		const environmentService = accessor.get(IEnvironmentService);
+		const editorGroupsService = accessor.get(IEditorGroupsService);
+
+		let bounds: { x: number; y: number; width: number; height: number } | undefined;
+
+		// If browserOnly is requested, find the editor container bounds
+		if (options?.browserOnly) {
+			const activeGroup = editorGroupsService.activeGroup;
+			// Access the group's element - IEditorGroup doesn't expose this directly
+			const groupElement = (activeGroup as unknown as { element?: HTMLElement }).element;
+			if (groupElement) {
+				const rect = groupElement.getBoundingClientRect();
+				bounds = {
+					x: Math.round(rect.x),
+					y: Math.round(rect.y),
+					width: Math.round(rect.width),
+					height: Math.round(rect.height)
+				};
+			}
+		}
+
+		// Capture screenshot (with bounds if browserOnly, full window otherwise)
+		const screenshot = await hostService.getScreenshot(bounds);
+		if (!screenshot) {
+			return false;
+		}
+
+		// Save to a temp file
+		const imagesFolder = joinPath(environmentService.workspaceStorageHome, 'simple-browser-screenshots');
+		const fileReference = await createFileForMedia(fileService, imagesFolder, screenshot.buffer, 'image/png');
+
+		// Get or reveal chat widget
+		const widget = await chatWidgetService.revealWidget() ?? chatWidgetService.lastFocusedWidget;
+		if (!widget) {
+			return false;
+		}
+
+		// Add the screenshot as an attachment
+		const name = options?.browserOnly ? 'Browser Screenshot' : 'Editor Screenshot';
+		widget.attachmentModel.addContext({
+			id: 'simple-browser-screenshot-' + Date.now(),
+			name,
+			fullName: name,
+			kind: 'image',
+			value: screenshot.buffer,
+			references: fileReference ? [{ reference: fileReference, kind: 'reference' }] : [],
+		});
+
+		return true;
+	}
+});
+
+type ConsoleLogCounts = { log: number; info: number; warn: number; error: number; debug?: number };
+
+type ConsoleLogsWithFallback = IConsoleLogsResult & {
+	__fallbackCounts?: ConsoleLogCounts;
+	__fallbackTotal?: number;
+};
+
+// --- Simple Browser Console Logs to Chat
+registerAction2(class SimpleBrowserConsoleToChatAction extends Action2 {
+	constructor() {
+		super({
+			id: 'simpleBrowser.consoleToChat',
+			title: localize2('simpleBrowser.consoleToChat', "Capture Console Logs to Chat"),
+			f1: false, // Not in command palette, called by extension
+			category: CHAT_CATEGORY,
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<boolean> {
+		const chatWidgetService = accessor.get(IChatWidgetService);
+		const notificationService = accessor.get(INotificationService);
+		const instantiationService = accessor.get(IInstantiationService);
+		const commandService = accessor.get(ICommandService);
+
+		// Show progress notification
+		notificationService.info(localize('simpleBrowser.consoleToChat.capturing', "Capturing console logs for 3 seconds..."));
+
+		// Dynamically import browserElementsService to avoid circular dependencies
+		const { IBrowserElementsService } = await import('../../../../services/browserElements/browser/browserElementsService.js');
+		const { BrowserType } = await import('../../../../../platform/browserElements/common/browserElements.js');
+		const browserElementsService = instantiationService.invokeFunction(accessor => accessor.get(IBrowserElementsService));
+
+		// Use CDP via browserElementsService to capture console logs
+		const cts = new CancellationTokenSource();
+		let result: ConsoleLogsWithFallback | undefined = await browserElementsService.getConsoleLogs(cts.token, BrowserType.SimpleBrowser, 3000);
+		console.warn('[simpleBrowser.consoleToChat] CDP result', result);
+
+		// Fallback to extension-host webview capture if CDP is unavailable
+		if (!result || !result.success) {
+			const primaryError = result?.error;
+			try {
+				const fallback = await commandService.executeCommand<{ success: boolean; url: string; logs?: string[]; counts?: { log: number; info: number; warn: number; error: number }; totalCount?: number; error?: string }>('simpleBrowser.getConsoleLogs');
+				console.warn('[simpleBrowser.consoleToChat] fallback result', fallback);
+				if (fallback?.success) {
+					result = {
+						success: true,
+						url: fallback.url,
+						logs: (fallback.logs ?? []).map(log => ({ type: 'log', timestamp: Date.now(), message: log })),
+						error: undefined,
+					};
+					// Attach counts to result via metadata using a symbol property to reuse summary logic below
+					result.__fallbackCounts = fallback.counts ? { ...fallback.counts } : undefined;
+					result.__fallbackTotal = fallback.totalCount;
+				} else {
+					const errorMessage = fallback?.error || primaryError || result?.error || 'Unknown error';
+					if (errorMessage.includes('not found') || errorMessage.includes('Window')) {
+						notificationService.warn(localize('simpleBrowser.consoleToChat.noActiveBrowser', "No Simple Browser is currently active. Please open a Simple Browser window first."));
+					} else {
+						notificationService.warn(localize('simpleBrowser.consoleToChat.error', "Failed to capture console logs: {0}", errorMessage));
+					}
+					return false;
+				}
+			} catch (err) {
+				const errorMessage = result?.error || String(err);
+				notificationService.warn(localize('simpleBrowser.consoleToChat.error', "Failed to capture console logs: {0}", errorMessage));
+				return false;
+			}
+		}
+
+		if (!result || !result.success) {
+			return false;
+		}
+
+		// Get or reveal chat widget
+		const widget = await chatWidgetService.revealWidget() ?? chatWidgetService.lastFocusedWidget;
+		if (!widget) {
+			return false;
+		}
+
+		const logs = result.logs;
+		const fallbackCounts = result.__fallbackCounts;
+
+		// Count by type (prefer fallback counts when provided by webview capture)
+		const counts: ConsoleLogCounts = fallbackCounts ?? {
+			log: logs.filter(e => e.type === 'log').length,
+			info: logs.filter(e => e.type === 'info').length,
+			warn: logs.filter(e => e.type === 'warn').length,
+			error: logs.filter(e => e.type === 'error').length,
+			debug: logs.filter(e => e.type === 'debug').length,
+		};
+
+		// Format logs for display
+		const formattedLogs = logs.map(entry => {
+			const time = new Date(entry.timestamp).toISOString();
+			const typeLabel = entry.type.toUpperCase().padEnd(5);
+			let logLine = `[${time}] ${typeLabel}: ${entry.message}`;
+			if (entry.url) {
+				logLine += ` (${entry.url}${entry.lineNumber !== undefined ? `:${entry.lineNumber}` : ''})`;
+			}
+			if (entry.stackTrace) {
+				logLine += `\n${entry.stackTrace}`;
+			}
+			return logLine;
+		});
+
+		const totalCount = result.__fallbackTotal ?? logs.length;
+
+		// Create a summary header
+		const debugCount = counts.debug ?? 0;
+		const summaryParts: string[] = [];
+		if (counts.error > 0) { summaryParts.push(`${counts.error} error${counts.error > 1 ? 's' : ''}`); }
+		if (counts.warn > 0) { summaryParts.push(`${counts.warn} warning${counts.warn > 1 ? 's' : ''}`); }
+		if (counts.log > 0) { summaryParts.push(`${counts.log} log${counts.log > 1 ? 's' : ''}`); }
+		if (counts.info > 0) { summaryParts.push(`${counts.info} info`); }
+		if (debugCount > 0) { summaryParts.push(`${debugCount} debug`); }
+
+		const summary = summaryParts.length > 0
+			? `Console logs from ${result.url}: ${summaryParts.join(', ')}`
+			: `Console logs from ${result.url}: ${totalCount} entries`;
+
+		// Combine summary and logs
+		const fullContent = totalCount > 0
+			? [summary, '', ...formattedLogs].join('\n')
+			: `${summary}\n\nNo console output captured during the 3-second capture window. Try generating some console output (e.g., by interacting with the page) and capture again.`;
+
+		// Add as a context attachment (as text content)
+		widget.attachmentModel.addContext({
+			id: 'simple-browser-console-' + Date.now(),
+			name: `Console (${totalCount} entries)`,
+			fullName: `Browser Console Logs - ${result.url}`,
+			kind: 'generic',
+			value: fullContent,
+		});
+
+		notificationService.info(localize('simpleBrowser.consoleToChat.captured', "Captured {0} console log entries", totalCount));
+
+		return true;
 	}
 });

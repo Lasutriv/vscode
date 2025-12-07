@@ -15,6 +15,18 @@ declare class URL {
 const openApiCommand = 'simpleBrowser.api.open';
 const showCommand = 'simpleBrowser.show';
 
+// Toolbar commands
+const screenshotCommand = 'simpleBrowser.screenshotPage';
+const screenshotEditorCommand = 'simpleBrowser.screenshotEditor';
+const zoomInCommand = 'simpleBrowser.zoomIn';
+const zoomOutCommand = 'simpleBrowser.zoomOut';
+const zoomResetCommand = 'simpleBrowser.zoomReset';
+const printPageCommand = 'simpleBrowser.printPage';
+const toggleDevToolsCommand = 'simpleBrowser.toggleDevTools';
+const pageSearchCommand = 'simpleBrowser.pageSearch';
+const captureConsoleCommand = 'simpleBrowser.captureConsole';
+const getConsoleLogsCommand = 'simpleBrowser.getConsoleLogs';
+
 const enabledHosts = new Set<string>([
 	'localhost',
 	// localhost IPv4
@@ -82,6 +94,125 @@ export function activate(context: vscode.ExtensionContext) {
 	}, {
 		schemes: ['http', 'https'],
 		label: vscode.l10n.t("Open in simple browser"),
+	}));
+
+	// Screenshot Page Command - captures only the Simple Browser content using native API with bounds
+	context.subscriptions.push(vscode.commands.registerCommand(screenshotCommand, async () => {
+		const activeView = manager.activeView;
+		if (!activeView) {
+			vscode.window.showWarningMessage(vscode.l10n.t("No Simple Browser is currently active"));
+			return;
+		}
+
+		try {
+			// Use the workbench-level command with browserOnly option
+			// This captures the editor container bounds using native Electron screenshot APIs
+			await vscode.commands.executeCommand<boolean>('simpleBrowser.screenshotToChat', { browserOnly: true });
+		} catch (error) {
+			vscode.window.showErrorMessage(vscode.l10n.t("Failed to capture screenshot: {0}", String(error)));
+		}
+	}));
+
+	// Screenshot Editor Command - captures full editor window using native Electron API
+	context.subscriptions.push(vscode.commands.registerCommand(screenshotEditorCommand, async () => {
+		const activeView = manager.activeView;
+		if (!activeView) {
+			vscode.window.showWarningMessage(vscode.l10n.t("No Simple Browser is currently active"));
+			return;
+		}
+
+		try {
+			// Use the workbench-level command without browserOnly to capture full window
+			await vscode.commands.executeCommand<boolean>('simpleBrowser.screenshotToChat', { browserOnly: false });
+		} catch (error) {
+			vscode.window.showErrorMessage(vscode.l10n.t("Failed to capture screenshot: {0}", String(error)));
+		}
+	}));
+
+	// Zoom In Command
+	context.subscriptions.push(vscode.commands.registerCommand(zoomInCommand, () => {
+		const activeView = manager.activeView;
+		if (!activeView) {
+			vscode.window.showWarningMessage(vscode.l10n.t("No Simple Browser is currently active"));
+			return;
+		}
+		activeView.zoom('in');
+	}));
+
+	// Zoom Out Command
+	context.subscriptions.push(vscode.commands.registerCommand(zoomOutCommand, () => {
+		const activeView = manager.activeView;
+		if (!activeView) {
+			vscode.window.showWarningMessage(vscode.l10n.t("No Simple Browser is currently active"));
+			return;
+		}
+		activeView.zoom('out');
+	}));
+
+	// Zoom Reset Command
+	context.subscriptions.push(vscode.commands.registerCommand(zoomResetCommand, () => {
+		const activeView = manager.activeView;
+		if (!activeView) {
+			vscode.window.showWarningMessage(vscode.l10n.t("No Simple Browser is currently active"));
+			return;
+		}
+		activeView.zoom('reset');
+	}));
+
+	// Print Page Command
+	context.subscriptions.push(vscode.commands.registerCommand(printPageCommand, () => {
+		const activeView = manager.activeView;
+		if (!activeView) {
+			vscode.window.showWarningMessage(vscode.l10n.t("No Simple Browser is currently active"));
+			return;
+		}
+		activeView.printPage();
+	}));
+
+	// Toggle DevTools Command
+	context.subscriptions.push(vscode.commands.registerCommand(toggleDevToolsCommand, () => {
+		const activeView = manager.activeView;
+		if (!activeView) {
+			vscode.window.showWarningMessage(vscode.l10n.t("No Simple Browser is currently active"));
+			return;
+		}
+		activeView.toggleDevTools();
+	}));
+
+	// Page Search Command
+	context.subscriptions.push(vscode.commands.registerCommand(pageSearchCommand, () => {
+		const activeView = manager.activeView;
+		if (!activeView) {
+			vscode.window.showWarningMessage(vscode.l10n.t("No Simple Browser is currently active"));
+			return;
+		}
+		activeView.pageSearch();
+	}));
+
+	// Capture Console Command - sends console logs to chat
+	context.subscriptions.push(vscode.commands.registerCommand(captureConsoleCommand, async () => {
+		const activeView = manager.activeView;
+		if (!activeView) {
+			vscode.window.showWarningMessage(vscode.l10n.t("No Simple Browser is currently active"));
+			return;
+		}
+
+		try {
+			// Use the workbench-level command to send console logs to chat
+			await vscode.commands.executeCommand('simpleBrowser.consoleToChat');
+		} catch (error) {
+			vscode.window.showErrorMessage(vscode.l10n.t("Failed to capture console logs: {0}", String(error)));
+		}
+	}));
+
+	// Get Console Logs Command - used as a fallback from workbench when CDP capture is unavailable
+	context.subscriptions.push(vscode.commands.registerCommand(getConsoleLogsCommand, async () => {
+		const activeView = manager.activeView;
+		if (!activeView) {
+			return { success: false, url: '', error: 'no-active-browser' };
+		}
+
+		return activeView.captureConsoleLogs();
 	}));
 }
 
