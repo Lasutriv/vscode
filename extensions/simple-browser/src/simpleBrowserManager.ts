@@ -14,6 +14,10 @@ export class SimpleBrowserManager {
 		private readonly extensionUri: vscode.Uri,
 	) { }
 
+	public get activeView(): SimpleBrowserView | undefined {
+		return this._activeView;
+	}
+
 	dispose() {
 		this._activeView?.dispose();
 		this._activeView = undefined;

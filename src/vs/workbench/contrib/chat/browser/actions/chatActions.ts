@@ -15,9 +15,11 @@ import { MarkdownString } from '../../../../../base/common/htmlContent.js';
 import { KeyCode, KeyMod } from '../../../../../base/common/keyCodes.js';
 import { Disposable, markAsSingleton } from '../../../../../base/common/lifecycle.js';
 import { language } from '../../../../../base/common/platform.js';
-import { basename } from '../../../../../base/common/resources.js';
+import { CancellationToken } from '../../../../../base/common/cancellation.js';
+import { basename, joinPath } from '../../../../../base/common/resources.js';
 import { ThemeIcon } from '../../../../../base/common/themables.js';
-import { URI } from '../../../../../base/common/uri.js';
+import { hasKey } from '../../../../../base/common/types.js';
+import { URI, UriComponents } from '../../../../../base/common/uri.js';
 import { ICodeEditor } from '../../../../../editor/browser/editorBrowser.js';
 import { EditorAction2 } from '../../../../../editor/browser/editorExtensions.js';
 import { IRange } from '../../../../../editor/common/core/range.js';
@@ -30,11 +32,13 @@ import { IConfigurationService } from '../../../../../platform/configuration/com
 import { ContextKeyExpr } from '../../../../../platform/contextkey/common/contextkey.js';
 import { IsLinuxContext, IsWindowsContext } from '../../../../../platform/contextkey/common/contextkeys.js';
 import { IDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
+import { IEnvironmentService } from '../../../../../platform/environment/common/environment.js';
 import { IFileService } from '../../../../../platform/files/common/files.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../../platform/instantiation/common/instantiation.js';
 import { KeybindingWeight } from '../../../../../platform/keybinding/common/keybindingsRegistry.js';
 import { INotificationService } from '../../../../../platform/notification/common/notification.js';
 import { IOpenerService } from '../../../../../platform/opener/common/opener.js';
+import { BrowserType, type IConsoleLogsResult } from '../../../../../platform/browserElements/common/browserElements.js';
 import product from '../../../../../platform/product/common/product.js';
 import { ITelemetryService } from '../../../../../platform/telemetry/common/telemetry.js';
 import { ToggleTitleBarConfigAction } from '../../../../browser/parts/titlebar/titlebarActions.js';
@@ -42,6 +46,7 @@ import { ActiveEditorContext, IsCompactTitleBarContext } from '../../../../commo
 import { IWorkbenchContribution } from '../../../../common/contributions.js';
 import { IViewDescriptorService, ViewContainerLocation } from '../../../../common/views.js';
 import { ChatEntitlement, IChatEntitlementService } from '../../../../services/chat/common/chatEntitlementService.js';
+import { IEditorGroupsService } from '../../../../services/editor/common/editorGroupsService.js';
 import { AUX_WINDOW_GROUP } from '../../../../services/editor/common/editorService.js';
 import { IHostService } from '../../../../services/host/browser/host.js';
 import { IWorkbenchLayoutService, Parts } from '../../../../services/layout/browser/layoutService.js';
@@ -68,6 +73,8 @@ import { ChatViewId, IChatWidget, IChatWidgetService } from '../chat.js';
 import { IChatEditorOptions } from '../widgetHosts/editor/chatEditor.js';
 import { ChatEditorInput, showClearEditingSessionConfirmation } from '../widgetHosts/editor/chatEditorInput.js';
 import { convertBufferToScreenshotVariable } from '../attachments/chatScreenshotContext.js';
+import { createFileForMedia } from '../chatImageUtils.js';
+import { IBrowserElementsService } from '../../../../services/browserElements/browser/browserElementsService.js';
 
 export const CHAT_CATEGORY = localize2('chat.category', 'Chat');
 
@@ -232,11 +239,30 @@ abstract class OpenChatGlobalAction extends Action2 {
 		}
 		if (opts?.attachFiles) {
 			for (const file of opts.attachFiles) {
-				const uri = file instanceof URI ? file : file.uri;
-				const range = file instanceof URI ? undefined : file.range;
+				// Handle URIs from extensions which may be serialized as plain objects
+				let uri: URI;
+				let range: IRange | undefined;
 
-				if (await fileService.exists(uri)) {
-					chatWidget.attachmentModel.addFile(uri, range);
+				if (file instanceof URI) {
+					uri = file;
+				} else if (hasKey(file, { uri: true }) && file.uri) {
+					const fileRange = hasKey(file, { range: true }) ? file.range : undefined;
+					uri = URI.isUri(file.uri) ? file.uri : URI.revive(file.uri as UriComponents);
+					range = fileRange as IRange | undefined;
+				} else if (hasKey(file, { scheme: true, path: true })) {
+					// Plain URI-like object from extension serialization
+					uri = URI.revive(file as unknown as UriComponents);
+				} else {
+					console.warn('[Chat attachFiles] Skipping invalid file entry:', file);
+					continue; // Skip invalid entries
+				}
+
+				console.log('[Chat attachFiles] Processing URI:', uri.toString(), 'scheme:', uri.scheme);
+				const exists = await fileService.exists(uri);
+				console.log('[Chat attachFiles] File exists:', exists);
+				if (exists) {
+					await chatWidget.attachmentModel.addFile(uri, range);
+					console.log('[Chat attachFiles] File added to attachment model');
 				}
 			}
 		}
@@ -1216,5 +1242,198 @@ registerAction2(class ToggleChatViewWelcomeAction extends Action2 {
 
 		const chatViewWelcomeEnabled = configurationService.getValue<boolean>(ChatConfiguration.ChatViewWelcomeEnabled);
 		await configurationService.updateValue(ChatConfiguration.ChatViewWelcomeEnabled, !chatViewWelcomeEnabled);
+	}
+});
+
+// --- Simple Browser Screenshot to Chat
+registerAction2(class SimpleBrowserScreenshotToChatAction extends Action2 {
+	constructor() {
+		super({
+			id: 'simpleBrowser.screenshotToChat',
+			title: localize2('simpleBrowser.screenshotToChat', "Screenshot Simple Browser to Chat"),
+			f1: false, // Called by the Simple Browser extension
+			category: CHAT_CATEGORY,
+		});
+	}
+
+	async run(accessor: ServicesAccessor, options?: { browserOnly?: boolean }): Promise<boolean> {
+		const hostService = accessor.get(IHostService);
+		const chatWidgetService = accessor.get(IChatWidgetService);
+		const fileService = accessor.get(IFileService);
+		const environmentService = accessor.get(IEnvironmentService);
+		const editorGroupsService = accessor.get(IEditorGroupsService);
+
+		let bounds: { x: number; y: number; width: number; height: number } | undefined;
+		if (options?.browserOnly) {
+			const activeGroup = editorGroupsService.activeGroup;
+			const groupElement = (activeGroup as unknown as { element?: HTMLElement }).element;
+			if (groupElement) {
+				const rect = groupElement.getBoundingClientRect();
+				bounds = {
+					x: Math.round(rect.x),
+					y: Math.round(rect.y),
+					width: Math.round(rect.width),
+					height: Math.round(rect.height)
+				};
+			}
+		}
+
+		const screenshot = await hostService.getScreenshot(bounds);
+		if (!screenshot) {
+			return false;
+		}
+
+		const imagesFolder = joinPath(environmentService.workspaceStorageHome, 'simple-browser-screenshots');
+		const fileReference = await createFileForMedia(fileService, imagesFolder, screenshot.buffer, 'image/png');
+
+		const widget = await chatWidgetService.revealWidget() ?? chatWidgetService.lastFocusedWidget;
+		if (!widget) {
+			return false;
+		}
+
+		const name = options?.browserOnly ? 'Browser Screenshot' : 'Editor Screenshot';
+		widget.attachmentModel.addContext({
+			id: 'simple-browser-screenshot-' + Date.now(),
+			name,
+			fullName: name,
+			kind: 'image',
+			value: screenshot.buffer,
+			references: fileReference ? [{ reference: fileReference, kind: 'reference' }] : [],
+		});
+
+		return true;
+	}
+});
+
+type ConsoleLogCounts = { log: number; info: number; warn: number; error: number; debug?: number };
+
+type ConsoleLogsWithFallback = IConsoleLogsResult & {
+	__fallbackCounts?: ConsoleLogCounts;
+	__fallbackTotal?: number;
+};
+
+// --- Simple Browser Console Logs to Chat
+registerAction2(class SimpleBrowserConsoleToChatAction extends Action2 {
+	constructor() {
+		super({
+			id: 'simpleBrowser.consoleToChat',
+			title: localize2('simpleBrowser.consoleToChat', "Capture Console Logs to Chat"),
+			f1: false, // Called by the Simple Browser extension
+			category: CHAT_CATEGORY,
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<boolean> {
+		const chatWidgetService = accessor.get(IChatWidgetService);
+		const notificationService = accessor.get(INotificationService);
+		const commandService = accessor.get(ICommandService);
+		const browserElementsService = accessor.get(IBrowserElementsService);
+
+		notificationService.info(localize('simpleBrowser.consoleToChat.capturing', "Capturing console logs for 3 seconds..."));
+
+		let result: ConsoleLogsWithFallback | undefined;
+		try {
+			result = await browserElementsService.getConsoleLogs(CancellationToken.None, BrowserType.SimpleBrowser, 3000);
+		} catch (err) {
+			result = {
+				success: false,
+				url: '',
+				logs: [],
+				error: String(err)
+			};
+		}
+
+		// Fallback to extension-host webview capture if CDP is unavailable
+		if (!result || !result.success) {
+			const primaryError = result?.error;
+			try {
+				const fallback = await commandService.executeCommand<{ success: boolean; url: string; logs?: string[]; counts?: { log: number; info: number; warn: number; error: number }; totalCount?: number; error?: string }>('simpleBrowser.getConsoleLogs');
+				if (fallback?.success) {
+					result = {
+						success: true,
+						url: fallback.url,
+						logs: (fallback.logs ?? []).map(log => ({ type: 'log', timestamp: Date.now(), message: log })),
+						error: undefined,
+					};
+					result.__fallbackCounts = fallback.counts ? { ...fallback.counts } : undefined;
+					result.__fallbackTotal = fallback.totalCount;
+				} else {
+					const errorMessage = fallback?.error || primaryError || result?.error || 'Unknown error';
+					if (errorMessage.includes('not found') || errorMessage.includes('Window')) {
+						notificationService.warn(localize('simpleBrowser.consoleToChat.noActiveBrowser', "No Simple Browser is currently active. Please open a Simple Browser window first."));
+					} else {
+						notificationService.warn(localize('simpleBrowser.consoleToChat.error', "Failed to capture console logs: {0}", errorMessage));
+					}
+					return false;
+				}
+			} catch (err) {
+				const errorMessage = result?.error || String(err);
+				notificationService.warn(localize('simpleBrowser.consoleToChat.error', "Failed to capture console logs: {0}", errorMessage));
+				return false;
+			}
+		}
+
+		if (!result || !result.success) {
+			return false;
+		}
+
+		const widget = await chatWidgetService.revealWidget() ?? chatWidgetService.lastFocusedWidget;
+		if (!widget) {
+			return false;
+		}
+
+		const logs = result.logs;
+		const fallbackCounts = result.__fallbackCounts;
+
+		const counts: ConsoleLogCounts = fallbackCounts ?? {
+			log: logs.filter(e => e.type === 'log').length,
+			info: logs.filter(e => e.type === 'info').length,
+			warn: logs.filter(e => e.type === 'warn').length,
+			error: logs.filter(e => e.type === 'error').length,
+			debug: logs.filter(e => e.type === 'debug').length,
+		};
+
+		const formattedLogs = logs.map(entry => {
+			const time = new Date(entry.timestamp).toISOString();
+			const typeLabel = entry.type.toUpperCase().padEnd(5);
+			let logLine = `[${time}] ${typeLabel}: ${entry.message}`;
+			if (entry.url) {
+				logLine += ` (${entry.url}${entry.lineNumber !== undefined ? `:${entry.lineNumber}` : ''})`;
+			}
+			if (entry.stackTrace) {
+				logLine += `\n${entry.stackTrace}`;
+			}
+			return logLine;
+		});
+
+		const totalCount = result.__fallbackTotal ?? logs.length;
+
+		const debugCount = counts.debug ?? 0;
+		const summaryParts: string[] = [];
+		if (counts.error > 0) { summaryParts.push(`${counts.error} error${counts.error > 1 ? 's' : ''}`); }
+		if (counts.warn > 0) { summaryParts.push(`${counts.warn} warning${counts.warn > 1 ? 's' : ''}`); }
+		if (counts.log > 0) { summaryParts.push(`${counts.log} log${counts.log > 1 ? 's' : ''}`); }
+		if (counts.info > 0) { summaryParts.push(`${counts.info} info`); }
+		if (debugCount > 0) { summaryParts.push(`${debugCount} debug`); }
+
+		const summary = summaryParts.length > 0
+			? `Console logs from ${result.url}: ${summaryParts.join(', ')}`
+			: `Console logs from ${result.url}: ${totalCount} entries`;
+
+		const fullContent = totalCount > 0
+			? [summary, '', ...formattedLogs].join('\n')
+			: `${summary}\n\nNo console output captured during the 3-second capture window. Try generating some console output (e.g., by interacting with the page) and capture again.`;
+
+		widget.attachmentModel.addContext({
+			id: 'simple-browser-console-' + Date.now(),
+			name: `Console (${totalCount} entries)`,
+			fullName: `Browser Console Logs - ${result.url}`,
+			kind: 'generic',
+			value: fullContent,
+		});
+
+		notificationService.info(localize('simpleBrowser.consoleToChat.captured', "Captured {0} console log entries", totalCount));
+
+		return true;
 	}
 });

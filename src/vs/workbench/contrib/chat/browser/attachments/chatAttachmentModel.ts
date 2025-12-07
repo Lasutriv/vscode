@@ -57,8 +57,11 @@ export class ChatAttachmentModel extends Disposable {
 	}
 
 	async addFile(uri: URI, range?: IRange) {
+		console.log('[ChatAttachmentModel.addFile] URI:', uri.toString(), 'path:', uri.path);
 		if (/\.(png|jpe?g|gif|bmp|webp)$/i.test(uri.path)) {
+			console.log('[ChatAttachmentModel.addFile] Detected image file, calling asImageVariableEntry');
 			const context = await this.asImageVariableEntry(uri);
+			console.log('[ChatAttachmentModel.addFile] Image context result:', context ? 'success' : 'undefined');
 			if (context) {
 				this.addContext(context);
 			}
@@ -173,13 +176,19 @@ export class ChatAttachmentModel extends Disposable {
 
 	// Gets an image variable for a given URI, which may be a file or a web URL
 	async asImageVariableEntry(uri: URI): Promise<IChatRequestVariableEntry | undefined> {
-		if (uri.scheme === Schemas.file && await this.fileService.canHandleResource(uri)) {
+		console.log('[ChatAttachmentModel.asImageVariableEntry] URI:', uri.toString(), 'scheme:', uri.scheme);
+		// Handle file: scheme and vscodeUserData: scheme (used by extension globalStorageUri)
+		if ((uri.scheme === Schemas.file || uri.scheme === Schemas.vscodeUserData) && await this.fileService.canHandleResource(uri)) {
+			console.log('[ChatAttachmentModel.asImageVariableEntry] Handling as file/vscodeUserData');
 			return await this.chatAttachmentResolveService.resolveImageEditorAttachContext(uri);
 		} else if (uri.scheme === Schemas.http || uri.scheme === Schemas.https) {
+			console.log('[ChatAttachmentModel.asImageVariableEntry] Handling as HTTP URL');
 			const extractedImages = await this.webContentExtractorService.readImage(uri, CancellationToken.None);
 			if (extractedImages) {
 				return await this.chatAttachmentResolveService.resolveImageEditorAttachContext(uri, extractedImages);
 			}
+		} else {
+			console.log('[ChatAttachmentModel.asImageVariableEntry] Unsupported scheme:', uri.scheme);
 		}
 
 		return undefined;

@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { BrowserType, IElementData, INativeBrowserElementsService } from '../../../../platform/browserElements/common/browserElements.js';
+import { BrowserType, IConsoleLogsResult, IElementData, INativeBrowserElementsService } from '../../../../platform/browserElements/common/browserElements.js';
 import { IRectangle } from '../../../../platform/window/common/window.js';
 import { ipcRenderer } from '../../../../base/parts/sandbox/electron-browser/globals.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
@@ -25,6 +25,7 @@ class WorkbenchNativeBrowserElementsService extends NativeBrowserElementsService
 
 let cancelSelectionIdPool = 0;
 let cancelAndDetachIdPool = 0;
+let cancelConsoleLogsIdPool = 0;
 
 class WorkbenchBrowserElementsService implements IBrowserElementsService {
 	_serviceBrand: undefined;
@@ -64,6 +65,22 @@ class WorkbenchBrowserElementsService implements IBrowserElementsService {
 		} catch (error) {
 			disposable.dispose();
 			throw new Error(`Native Host: Error getting element data: ${error}`);
+		} finally {
+			disposable.dispose();
+		}
+	}
+
+	async getConsoleLogs(token: CancellationToken, browserType: BrowserType, durationMs?: number): Promise<IConsoleLogsResult> {
+		const cancelId = cancelConsoleLogsIdPool++;
+		const onCancelChannel = `vscode:cancelConsoleLogs${cancelId}`;
+		const disposable = token.onCancellationRequested(() => {
+			ipcRenderer.send(onCancelChannel, cancelId);
+		});
+		try {
+			const result = await this.simpleBrowser.getConsoleLogs(token, browserType, durationMs);
+			return result;
+		} catch (error) {
+			return { success: false, url: '', logs: [], error: String(error) };
 		} finally {
 			disposable.dispose();
 		}

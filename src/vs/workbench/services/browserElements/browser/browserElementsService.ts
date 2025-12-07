@@ -5,7 +5,7 @@
 
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
-import { BrowserType, IElementData } from '../../../../platform/browserElements/common/browserElements.js';
+import { BrowserType, IConsoleLogsResult, IElementData } from '../../../../platform/browserElements/common/browserElements.js';
 import { IRectangle } from '../../../../platform/window/common/window.js';
 
 export const IBrowserElementsService = createDecorator<IBrowserElementsService>('browserElementsService');
@@ -17,4 +17,6 @@ export interface IBrowserElementsService {
 	getElementData(rect: IRectangle, token: CancellationToken, browserType: BrowserType | undefined): Promise<IElementData | undefined>;
 
 	startDebugSession(token: CancellationToken, browserType: BrowserType): Promise<void>;
+
+	getConsoleLogs(token: CancellationToken, browserType: BrowserType, durationMs?: number): Promise<IConsoleLogsResult>;
 }
