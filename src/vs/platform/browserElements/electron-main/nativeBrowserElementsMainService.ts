@@ -48,7 +48,8 @@ export class NativeBrowserElementsMainService extends Disposable implements INat
 	get windowId(): never { throw new Error('Not implemented in electron-main'); }
 
 	async findWebviewTarget(debuggers: Electron.Debugger, windowId: number, browserType: BrowserType): Promise<string | undefined> {
-		const { targetInfos } = await debuggers.sendCommand<{ targetInfos: TargetInfo[] }>('Target.getTargets');
+		const targetInfosResult = await (debuggers.sendCommand as unknown as (command: string) => Promise<unknown>)('Target.getTargets');
+		const { targetInfos } = targetInfosResult as { targetInfos: TargetInfo[] };
 		this.logService.info(`[browserElements] findWebviewTarget: inspecting ${targetInfos.length} targets for windowId=${windowId} browserType=${browserType}`);
 
 		// First try strict parameter matching

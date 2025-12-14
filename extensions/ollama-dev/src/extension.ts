@@ -8,9 +8,15 @@ import { spawn, ChildProcess } from 'child_process';
 import * as http from 'http';
 
 // Configuration keys
+const LLAMA_CPP_PATCH_MARKER = '2025-12-14-alternation-safety-net-v3';
 const OLLAMA_REMOTE_HOST_CONFIG = 'ollamaDev.remoteHost';
 const OLLAMA_REMOTE_PORT_CONFIG = 'ollamaDev.remotePort';
 const OLLAMA_LOCAL_PORT_CONFIG = 'ollamaDev.localPort';
+const OLLAMA_CONNECTION_MODE_CONFIG = 'ollamaDev.connectionMode';
+const OLLAMA_LOCAL_ENDPOINT_CONFIG = 'ollamaDev.localEndpoint';
+
+type ConnectionMode = 'ssh' | 'local';
+type ApiMode = 'ollama' | 'llamaCpp';
 
 interface OllamaModel {
 	name: string;
@@ -108,6 +114,248 @@ interface OllamaModelInfo extends vscode.LanguageModelChatInformation {
 	ollamaName: string;
 }
 
+interface OpenAIChatMessage {
+	role: 'system' | 'developer' | 'user' | 'assistant' | 'tool';
+	content?: string | null;
+	name?: string;
+	tool_call_id?: string;
+	tool_calls?: Array<{
+		id?: string;
+		type: 'function';
+		function: { name: string; arguments: string };
+	}>;
+}
+
+interface LlamaCppAlternationViolationInfo {
+	countedIndex: number;
+	messageIndex: number;
+	expectedRole: 'user' | 'assistant';
+	actualRole: 'user' | 'assistant';
+}
+
+interface OpenAIChatRequest {
+	model: string;
+	messages: OpenAIChatMessage[];
+	stream: boolean;
+	tools?: OllamaTool[];
+	temperature?: number;
+	max_tokens?: number;
+}
+
+interface OpenAIStreamChunk {
+	id?: string;
+	choices: Array<{
+		delta: {
+			content?: string;
+			tool_calls?: Array<{
+				id?: string;
+				index?: number;
+				type: 'function';
+				function: { name: string; arguments: string };
+			}>;
+		};
+		finish_reason?: string;
+	}>;
+	usage?: {
+		prompt_tokens?: number;
+		completion_tokens?: number;
+		total_tokens?: number;
+	};
+}
+
+function normalizeMessagesForAlternatingTemplate(messages: readonly OllamaChatMessage[], outputChannel?: vscode.OutputChannel): OllamaChatMessage[] {
+	// Some llama.cpp chat templates (including the Devstral one shown in logs) enforce:
+	// after optional system message, counted roles must alternate user/assistant.
+	// VS Code often provides multiple user messages up front (context chunks), which
+	// breaks that rule. We merge consecutive same-role messages to restore alternation.
+	const out: OllamaChatMessage[] = [];
+
+	for (const msg of messages) {
+		const prev = out[out.length - 1];
+
+		// Only merge the plain chat roles. Tool messages must remain separate.
+		const isMergeableRole = msg.role === 'system' || msg.role === 'user' || msg.role === 'assistant';
+		const prevIsMergeableRole = prev && (prev.role === 'system' || prev.role === 'user' || prev.role === 'assistant');
+
+		// Do not merge assistant tool calls into normal assistant content.
+		const msgHasToolCalls = msg.role === 'assistant' && (msg.tool_calls?.length ?? 0) > 0;
+		const prevHasToolCalls = prev?.role === 'assistant' && (prev.tool_calls?.length ?? 0) > 0;
+
+		if (prev && prevIsMergeableRole && isMergeableRole && prev.role === msg.role && !msgHasToolCalls && !prevHasToolCalls) {
+			prev.content = prev.content ? `${prev.content}\n\n${msg.content}` : msg.content;
+			// Merge images if present (multimodal prompts)
+			if (prev.images || msg.images) {
+				prev.images = [...(prev.images ?? []), ...(msg.images ?? [])];
+			}
+			continue;
+		}
+
+		out.push({ ...msg });
+	}
+
+	// If we ended up with multiple system messages separated by non-mergeables, collapse
+	// all system messages into the first one (llama.cpp templates expect <= 1 at start).
+	const firstSystemIndex = out.findIndex(m => m.role === 'system');
+	if (firstSystemIndex > 0) {
+		// If a system message appears after other roles, treat it as user content.
+		// This keeps the information but avoids violating the template.
+		outputChannel?.appendLine('[ollama-dev] Normalizing: converting late system messages to user messages for llama.cpp compatibility.');
+	}
+
+	const normalized: OllamaChatMessage[] = [];
+	let systemContent = '';
+	for (const m of out) {
+		if (m.role === 'system') {
+			systemContent = systemContent ? `${systemContent}\n\n${m.content}` : m.content;
+			continue;
+		}
+		normalized.push(m);
+	}
+	if (systemContent) {
+		normalized.unshift({ role: 'system', content: systemContent });
+	}
+
+	return normalized;
+}
+
+function normalizeOpenAIMessagesForAlternatingTemplate(messages: readonly OpenAIChatMessage[], outputChannel?: vscode.OutputChannel): OpenAIChatMessage[] {
+	// Some llama.cpp chat templates (including the Devstral one) enforce:
+	// after optional system message, counted roles must alternate user/assistant,
+	// ignoring tool messages and assistant tool_calls messages.
+	// This means patterns like: user -> tool -> user will FAIL (tool is ignored).
+	// We normalize by:
+	//  - merging multiple system messages into a single leading one
+	//  - merging repeated counted roles (user/user or assistant/assistant) even when separated by tool/tool_calls messages
+	const out: OpenAIChatMessage[] = [];
+
+	// Merge system/developer messages into first (llama.cpp templates typically expect <= 1 system message at start).
+	let systemContent = '';
+	const nonSystem: OpenAIChatMessage[] = [];
+	for (const m of messages) {
+		if (m.role === 'system' || m.role === 'developer') {
+			const c = typeof m.content === 'string' ? m.content : '';
+			systemContent = systemContent ? `${systemContent}\n\n${c}` : c;
+			continue;
+		}
+		nonSystem.push(m);
+	}
+	if (systemContent) {
+		out.push({ role: 'system', content: systemContent });
+	}
+
+	let lastCountedRole: 'user' | 'assistant' | undefined;
+	let lastCountedIndex = -1;
+	const isAssistantWithToolCalls = (m: OpenAIChatMessage) => m.role === 'assistant' && !!(m.tool_calls && m.tool_calls.length > 0);
+	const isCounted = (m: OpenAIChatMessage) => m.role === 'user' || (m.role === 'assistant' && !isAssistantWithToolCalls(m));
+
+	for (const m of nonSystem) {
+		// tool messages are ignored by the alternation check, keep them as-is
+		if (m.role === 'tool' || isAssistantWithToolCalls(m)) {
+			out.push(m);
+			continue;
+		}
+
+		// Late system/developer messages shouldn't happen, but if they do, treat them as user content.
+		if (m.role === 'system' || m.role === 'developer') {
+			const c = typeof m.content === 'string' ? m.content : '';
+			const userMsg: OpenAIChatMessage = { role: 'user', content: c || null };
+			// fall through to counted-role normalization
+			m.role = userMsg.role;
+			m.content = userMsg.content;
+		}
+
+		if (!isCounted(m)) {
+			out.push(m);
+			continue;
+		}
+
+		const role: 'user' | 'assistant' = m.role === 'assistant' ? 'assistant' : 'user';
+		if (lastCountedRole === undefined) {
+			// The first counted message must be user. If we see assistant first, coerce it.
+			if (role !== 'user') {
+				outputChannel?.appendLine('[ollama-dev] Normalizing OpenAI messages: first counted message was not user; coercing to user for llama.cpp template compatibility.');
+				m.role = 'user';
+			}
+			out.push(m);
+			lastCountedRole = 'user';
+			lastCountedIndex = out.length - 1;
+			continue;
+		}
+
+		if (role === lastCountedRole && lastCountedIndex >= 0) {
+			// Merge repeated counted roles (including cases where tool messages were between them).
+			const prev = out[lastCountedIndex];
+			const prevContent = typeof prev.content === 'string' ? prev.content : '';
+			const curContent = typeof m.content === 'string' ? m.content : '';
+			if (curContent) {
+				prev.content = prevContent ? `${prevContent}\n${curContent}` : curContent;
+				outputChannel?.appendLine(`[ollama-dev] Normalizing OpenAI messages: merged repeated '${role}' message for llama.cpp template compatibility.`);
+			}
+			continue;
+		}
+
+		out.push(m);
+		lastCountedRole = role;
+		lastCountedIndex = out.length - 1;
+	}
+
+	// As a final safety net, ensure the sequence passes the exact llama.cpp alternation check by
+	// inserting minimal placeholder messages when needed.
+	let normalized = out;
+	for (let pass = 0; pass < 200; pass++) {
+		const v = getLlamaCppAlternationViolationInfo(normalized);
+		if (!v) {
+			break;
+		}
+		const hasLeadingSystem = normalized.length > 0 && normalized[0].role === 'system';
+		const insertAt = (hasLeadingSystem ? 1 : 0) + v.messageIndex;
+		outputChannel?.appendLine(`[ollama-dev] Normalizing OpenAI messages: inserting missing '${v.expectedRole}' message to satisfy llama.cpp alternation (before messageIndex=${v.messageIndex}).`);
+		normalized = [
+			...normalized.slice(0, insertAt),
+			{ role: v.expectedRole, content: null },
+			...normalized.slice(insertAt)
+		];
+	}
+
+	return normalized;
+}
+
+function getLlamaCppAlternationViolationInfo(messages: readonly OpenAIChatMessage[]): LlamaCppAlternationViolationInfo | undefined {
+	// Mirrors the Devstral llama.cpp chat template check:
+	// After optional system message, the *counted* messages (user and assistant without tool_calls)
+	// must alternate starting with user.
+	const loopMessages = messages.length > 0 && messages[0].role === 'system' ? messages.slice(1) : messages;
+	let index = 0;
+	for (let i = 0; i < loopMessages.length; i++) {
+		const m = loopMessages[i];
+		const assistantHasToolCalls = m.role === 'assistant' && !!(m.tool_calls && m.tool_calls.length > 0);
+		const isCounted = m.role === 'user' || (m.role === 'assistant' && !assistantHasToolCalls);
+		if (!isCounted) {
+			continue;
+		}
+		const expectedIsUser = index % 2 === 0;
+		const actualIsUser = m.role === 'user';
+		if (actualIsUser !== expectedIsUser) {
+			return {
+				countedIndex: index,
+				messageIndex: i,
+				expectedRole: expectedIsUser ? 'user' : 'assistant',
+				actualRole: actualIsUser ? 'user' : 'assistant'
+			};
+		}
+		index++;
+	}
+	return undefined;
+}
+
+function getLlamaCppAlternationViolation(messages: readonly OpenAIChatMessage[]): string | undefined {
+	const v = getLlamaCppAlternationViolationInfo(messages);
+	if (!v) {
+		return undefined;
+	}
+	return `Counted-message alternation violation at countedIndex=${v.countedIndex}, messageIndex=${v.messageIndex}, role=${v.actualRole} (expected ${v.expectedRole})`;
+}
+
 // Helper function to make HTTP requests using Node.js http module
 function httpRequest(url: string, options: { method: string; headers?: Record<string, string>; body?: string }, outputChannel?: vscode.OutputChannel): Promise<{ status: number; body: string }> {
 	return new Promise((resolve, reject) => {
@@ -162,21 +410,30 @@ function httpStreamRequest(
 ): Promise<void> {
 	return new Promise((resolve, reject) => {
 		const urlObj = new URL(url);
+		// llama.cpp can take a long time to emit the first token when the prompt is large
+		// (e.g. lots of tools / very long context). Node's request `timeout` is an
+		// inactivity timeout, so we set it high to avoid aborting during prompt eval.
+		const streamTimeoutMs = 30 * 60 * 1000; // 30 minutes
 		const reqOptions: http.RequestOptions = {
 			hostname: urlObj.hostname,
 			port: urlObj.port || 80,
 			path: urlObj.pathname + urlObj.search,
 			method: options.method,
 			headers: options.headers || {},
-			timeout: 300000 // 5 minute timeout for streaming
+			timeout: streamTimeoutMs
 		};
 
-		outputChannel?.appendLine(`[HTTP] Streaming request ${options.method} ${url}`);
+		outputChannel?.appendLine(`[HTTP] Streaming request ${options.method} ${url} (timeout=${streamTimeoutMs}ms)`);
 
 		const req = http.request(reqOptions, (res) => {
 			if (res.statusCode !== 200) {
-				outputChannel?.appendLine(`[HTTP] Stream error: HTTP ${res.statusCode}`);
-				reject(new Error(`HTTP ${res.statusCode}`));
+				const errorChunks: Buffer[] = [];
+				res.on('data', (chunk: Buffer) => errorChunks.push(chunk));
+				res.on('end', () => {
+					const errorBody = Buffer.concat(errorChunks).toString();
+					outputChannel?.appendLine(`[HTTP] Stream error: HTTP ${res.statusCode} body: ${errorBody}`);
+					reject(new Error(`HTTP ${res.statusCode}: ${errorBody}`));
+				});
 				return;
 			}
 
@@ -507,18 +764,30 @@ class OllamaLanguageModelProvider implements vscode.Disposable {
 	private readonly _sshTunnel: SshTunnel;
 	private readonly _outputChannel: vscode.OutputChannel;
 	private _localPort: number;
+	private _connectionMode: ConnectionMode;
+	private _localEndpoint: string;
+	private _apiMode: ApiMode = 'ollama';
 
 	constructor(outputChannel: vscode.OutputChannel, sshTunnel: SshTunnel) {
 		this._outputChannel = outputChannel;
 		this._sshTunnel = sshTunnel;
-		this._localPort = vscode.workspace.getConfiguration().get<number>(OLLAMA_LOCAL_PORT_CONFIG) || 43134;
+		const config = vscode.workspace.getConfiguration();
+		this._localPort = config.get<number>(OLLAMA_LOCAL_PORT_CONFIG) || 43134;
+		this._connectionMode = (config.get<string>(OLLAMA_CONNECTION_MODE_CONFIG) as ConnectionMode) || 'ssh';
+		this._localEndpoint = config.get<string>(OLLAMA_LOCAL_ENDPOINT_CONFIG) || 'http://127.0.0.1:11434';
 
 		// Watch for configuration changes
 		this._disposables.push(
 			vscode.workspace.onDidChangeConfiguration((e: vscode.ConfigurationChangeEvent) => {
 				if (e.affectsConfiguration(OLLAMA_REMOTE_HOST_CONFIG) ||
 					e.affectsConfiguration(OLLAMA_REMOTE_PORT_CONFIG) ||
-					e.affectsConfiguration(OLLAMA_LOCAL_PORT_CONFIG)) {
+					e.affectsConfiguration(OLLAMA_LOCAL_PORT_CONFIG) ||
+					e.affectsConfiguration(OLLAMA_CONNECTION_MODE_CONFIG) ||
+					e.affectsConfiguration(OLLAMA_LOCAL_ENDPOINT_CONFIG)) {
+					const newConfig = vscode.workspace.getConfiguration();
+					this._localPort = newConfig.get<number>(OLLAMA_LOCAL_PORT_CONFIG) || this._localPort;
+					this._connectionMode = (newConfig.get<string>(OLLAMA_CONNECTION_MODE_CONFIG) as ConnectionMode) || this._connectionMode;
+					this._localEndpoint = newConfig.get<string>(OLLAMA_LOCAL_ENDPOINT_CONFIG) || this._localEndpoint;
 					this._onDidChange.fire();
 				}
 			})
@@ -526,6 +795,9 @@ class OllamaLanguageModelProvider implements vscode.Disposable {
 	}
 
 	private getEndpoint(): string {
+		if (this._connectionMode === 'local') {
+			return this._localEndpoint;
+		}
 		return `http://127.0.0.1:${this._localPort}`;
 	}
 
@@ -533,77 +805,176 @@ class OllamaLanguageModelProvider implements vscode.Disposable {
 		this._localPort = port;
 	}
 
+	setConnectionMode(mode: ConnectionMode, localEndpoint?: string): void {
+		this._connectionMode = mode;
+		if (localEndpoint) {
+			this._localEndpoint = localEndpoint;
+		}
+		this._onDidChange.fire();
+	}
+
 	async provideLanguageModelChatInformation(_options: vscode.PrepareLanguageModelChatModelOptions, _token: vscode.CancellationToken): Promise<OllamaModelInfo[]> {
-		if (!this._sshTunnel.isConnected) {
+		if (this._connectionMode === 'ssh' && !this._sshTunnel.isConnected) {
 			this._outputChannel.appendLine(`[ollama-dev] SSH tunnel not connected, cannot fetch models`);
 			return this._cachedModels;
 		}
 
 		const endpoint = this.getEndpoint();
+		let forceLlamaEndpoint = endpoint.includes('8081') || endpoint.includes('llama.cpp');
+		this._outputChannel.appendLine(`[ollama-dev] Discovery endpoint=${endpoint}, forceLlamaEndpoint=${forceLlamaEndpoint}`);
 
-		try {
-			this._outputChannel.appendLine(`[ollama-dev] Fetching models from ${endpoint}/api/tags`);
-
-			const response = await httpRequest(`${endpoint}/api/tags`, {
-				method: 'GET',
-				headers: { 'Content-Type': 'application/json' }
-			}, this._outputChannel);
-
-			if (response.status !== 200) {
-				this._outputChannel.appendLine(`[ollama-dev] Failed to fetch models: HTTP ${response.status}`);
-				return this._cachedModels;
-			}
-
-			const data = JSON.parse(response.body) as OllamaTagsResponse;
-
-			this._cachedModels = data.models.map(model => ({
-				id: `ollama/${model.name}`,
-				name: model.name,
-				vendor: 'ollama',
-				ollamaName: model.name,
-				family: model.details?.family || 'unknown',
-				version: model.details?.parameter_size || '1.0',
-				detail: '0x',  // Shows in "Multiplier" column - 0x cost since these are local models
-				isUserSelectable: true,
-				capabilities: {
-					// Enable tool calling - Ollama supports native tool calling via the tools parameter
-					toolCalling: true,
-					agentMode: true,
-					// Hint which edit tools the model supports
-					// 'multi-find-replace': Find and replace multiple text snippets across documents
-					// 'find-replace': Find and replace text in a document
-					// These help VS Code know how to use the model for file editing
-					editTools: ['multi-find-replace', 'find-replace'],
-				},
-				// IMPORTANT: Match advertised limits to actual num_ctx sent to Ollama
-				// Using 128K context to avoid summarization triggering and context blow-up issues
-				maxInputTokens: 131072,   // 128K context - must match num_ctx in request options
-				maxOutputTokens: 16384    // 16K output limit
+		// If cache already contains gguf, coerce to llama.cpp
+		if (this._cachedModels.length > 0 && this._cachedModels.some(m => m.ollamaName.endsWith('.gguf'))) {
+			this._apiMode = 'llamaCpp';
+			forceLlamaEndpoint = true;
+			this._cachedModels = this._cachedModels.map(m => ({
+				...m,
+				id: m.id.startsWith('llama.cpp/') ? m.id : `llama.cpp/${m.ollamaName}`,
+				name: m.name.includes('(llama.cpp)') ? m.name : `${m.ollamaName} (llama.cpp)`,
+				vendor: 'llama.cpp'
 			}));
-
-			// Log the model metadata for debugging
-			this._outputChannel.appendLine(`[ollama-dev] Model metadata: ${JSON.stringify(this._cachedModels.map(m => ({
-				id: m.id,
-				maxInputTokens: m.maxInputTokens,
-				maxOutputTokens: m.maxOutputTokens,
-				toolCalling: m.capabilities?.toolCalling
-			})), null, 2)}`);
-
-			this._outputChannel.appendLine(`[ollama-dev] Found ${this._cachedModels.length} models: ${this._cachedModels.map(m => m.name).join(', ')}`);
-			return this._cachedModels;
-
-		} catch (error) {
-			if (error instanceof AggregateError) {
-				this._outputChannel.appendLine(`[ollama-dev] AggregateError with ${error.errors.length} errors:`);
-				for (const e of error.errors) {
-					const nodeErr = e as NodeJS.ErrnoException;
-					this._outputChannel.appendLine(`  - ${nodeErr.message} (code: ${nodeErr.code}, errno: ${nodeErr.errno})`);
-				}
-			} else {
-				this._outputChannel.appendLine(`[ollama-dev] Error connecting to Ollama: ${error}`);
-			}
+			this._outputChannel.appendLine(`[ollama-dev] Coerced cached gguf models to llama.cpp mode: ${this._cachedModels.map(m => m.name).join(', ')}`);
 			return this._cachedModels;
 		}
+
+		const tryLlamaCpp = async (): Promise<OllamaModelInfo[] | undefined> => {
+			try {
+				this._outputChannel.appendLine(`[ollama-dev] Fetching models from ${endpoint}/v1/models (llama.cpp check)`);
+				const modelsResponse = await httpRequest(`${endpoint}/v1/models`, {
+					method: 'GET',
+					headers: { 'Content-Type': 'application/json' }
+				}, this._outputChannel);
+
+				if (modelsResponse.status === 200) {
+					const data = JSON.parse(modelsResponse.body);
+					// Check for llama.cpp signature in data or headers
+					const isLlamaCpp = (data.data && Array.isArray(data.data) && data.data.length > 0 && (data.data[0].owned_by === 'llamacpp' || (data.data[0].id && data.data[0].id.endsWith('.gguf')))) || (data.models && Array.isArray(data.models) && data.models.length > 0 && (data.models[0].name && data.models[0].name.endsWith('.gguf')));
+					if (isLlamaCpp) {
+						forceLlamaEndpoint = true;
+						this._apiMode = 'llamaCpp';
+						const models: OllamaModelInfo[] = (data.data || data.models || []).map((model: { id?: string; name?: string }) => ({
+							id: `llama.cpp/${model.id || model.name}`,
+							name: `${model.id || model.name} (llama.cpp)`,
+							vendor: 'llama.cpp',
+							ollamaName: model.id || model.name,
+							family: 'unknown',
+							version: '1.0',
+							detail: '0x',
+							isUserSelectable: true,
+							capabilities: {
+								toolCalling: true,
+								agentMode: true,
+								editTools: ['multi-find-replace', 'find-replace'],
+							},
+							maxInputTokens: 65536,
+							maxOutputTokens: 16384
+						}));
+						this._cachedModels = models;
+						this._outputChannel.appendLine(`[ollama-dev] Found ${models.length} models (llama.cpp): ${models.map((m: OllamaModelInfo) => m.name).join(', ')}`);
+						return models;
+					}
+				}
+				this._outputChannel.appendLine(`[ollama-dev] llama.cpp /v1/models failed (HTTP ${modelsResponse.status}). Trying Ollama /api/tags...`);
+			} catch (error) {
+				this._outputChannel.appendLine(`[ollama-dev] Error connecting to /v1/models: ${error}`);
+			}
+			return undefined;
+		};
+
+		// If endpoint or model data indicates llama.cpp, force llama.cpp mode and never use /api/tags
+		const llamaModels = await tryLlamaCpp();
+		if (forceLlamaEndpoint) {
+			if (llamaModels) {
+				return llamaModels;
+			}
+			this._outputChannel.appendLine(`[ollama-dev] llama.cpp forced by endpoint but /v1/models returned no models. Skipping /api/tags.`);
+			return this._cachedModels;
+		}
+
+		// Only use /api/tags if not llama.cpp; if llama.cpp is forced but models were empty, still avoid /api/tags.
+		if (!forceLlamaEndpoint) {
+			try {
+				this._outputChannel.appendLine(`[ollama-dev] Fetching models from ${endpoint}/api/tags`);
+				const response = await httpRequest(`${endpoint}/api/tags`, {
+					method: 'GET',
+					headers: { 'Content-Type': 'application/json' }
+				}, this._outputChannel);
+
+				if (response.status === 200) {
+					const data = JSON.parse(response.body) as OllamaTagsResponse;
+					// If tags contain .gguf, treat as llama.cpp anyway
+					const hasGguf = data.models.some(m => m.name.endsWith('.gguf'));
+					if (hasGguf) {
+						this._apiMode = 'llamaCpp';
+						forceLlamaEndpoint = true;
+						this._outputChannel.appendLine(`[ollama-dev] Detected .gguf in /api/tags; treating as llama.cpp and skipping Ollama API mode.`);
+						this._cachedModels = data.models.map(model => ({
+							id: `llama.cpp/${model.name}`,
+							name: `${model.name} (llama.cpp)`,
+							vendor: 'llama.cpp',
+							ollamaName: model.name,
+							family: 'unknown',
+							version: '1.0',
+							detail: '0x',
+							isUserSelectable: true,
+							capabilities: {
+								toolCalling: true,
+								agentMode: true,
+								editTools: ['multi-find-replace', 'find-replace'],
+							},
+							maxInputTokens: 65536,
+							maxOutputTokens: 16384
+						}));
+						this._outputChannel.appendLine(`[ollama-dev] Found ${this._cachedModels.length} models (llama.cpp inferred from tags): ${this._cachedModels.map(m => m.name).join(', ')}`);
+						return this._cachedModels;
+					}
+
+					this._apiMode = 'ollama';
+
+					this._cachedModels = data.models.map(model => ({
+						id: `ollama/${model.name}`,
+						name: model.name,
+						vendor: 'ollama',
+						ollamaName: model.name,
+						family: model.details?.family || 'unknown',
+						version: model.details?.parameter_size || '1.0',
+						detail: '0x',
+						isUserSelectable: true,
+						capabilities: {
+							toolCalling: true,
+							agentMode: true,
+							...(model.name.startsWith('devstral-small-2') && { imageInput: true, vision: true }),
+							editTools: ['multi-find-replace', 'find-replace'],
+						},
+						maxInputTokens: 65536,
+						maxOutputTokens: 16384
+					}));
+
+					this._outputChannel.appendLine(`[ollama-dev] Model metadata: ${JSON.stringify(this._cachedModels.map(m => ({
+						id: m.id,
+						maxInputTokens: m.maxInputTokens,
+						maxOutputTokens: m.maxOutputTokens,
+						toolCalling: m.capabilities?.toolCalling
+					})), null, 2)}`);
+					this._outputChannel.appendLine(`[ollama-dev] Found ${this._cachedModels.length} models (Ollama): ${this._cachedModels.map(m => m.name).join(', ')}`);
+					return this._cachedModels;
+				}
+
+				this._outputChannel.appendLine(`[ollama-dev] Ollama /api/tags failed (HTTP ${response.status}).`);
+			} catch (error) {
+				if (error instanceof AggregateError) {
+					this._outputChannel.appendLine(`[ollama-dev] AggregateError with ${error.errors.length} errors:`);
+					for (const e of error.errors) {
+						const nodeErr = e as NodeJS.ErrnoException;
+						this._outputChannel.appendLine(`  - ${nodeErr.message} (code: ${nodeErr.code}, errno: ${nodeErr.errno})`);
+					}
+				} else {
+					this._outputChannel.appendLine(`[ollama-dev] Error connecting to Ollama: ${error}`);
+				}
+			}
+		}
+
+		return this._cachedModels;
 	}
 
 	async provideLanguageModelChatResponse(
@@ -613,23 +984,29 @@ class OllamaLanguageModelProvider implements vscode.Disposable {
 		progress: vscode.Progress<vscode.LanguageModelResponsePart2>,
 		token: vscode.CancellationToken
 	): Promise<void> {
-		if (!this._sshTunnel.isConnected) {
+		if (this._connectionMode === 'ssh' && !this._sshTunnel.isConnected) {
 			throw new Error('SSH tunnel not connected');
 		}
 
 		const endpoint = this.getEndpoint();
+		const isGguf = model.ollamaName.endsWith('.gguf') || model.id.includes('.gguf');
+		const llamaHint = endpoint.includes('8081') || endpoint.includes('llama.cpp') || this._apiMode === 'llamaCpp';
+		if (isGguf || llamaHint) {
+			this._apiMode = 'llamaCpp';
+			return this.provideLlamaCppChatResponse(model, messages, options, progress, token);
+		}
 		const requestId = `req-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 7)}`;
 
 		// ===== DETAILED REQUEST LOGGING =====
-		this._outputChannel.appendLine(`\n[ollama-dev] ═══════════════════════════════════════════════════════════════`);
+		this._outputChannel.appendLine(`\n[ollama-dev] ======================================================================`);
 		this._outputChannel.appendLine(`[ollama-dev] REQUEST ${requestId}`);
-		this._outputChannel.appendLine(`[ollama-dev] ═══════════════════════════════════════════════════════════════`);
+		this._outputChannel.appendLine(`[ollama-dev] ======================================================================`);
 		this._outputChannel.appendLine(`[ollama-dev] Timestamp: ${new Date().toISOString()}`);
 		this._outputChannel.appendLine(`[ollama-dev] Model: ${model.name} (${model.ollamaName})`);
 		this._outputChannel.appendLine(`[ollama-dev] Model ID: ${model.id}`);
 		this._outputChannel.appendLine(`[ollama-dev] Model Family: ${model.family}`);
 		this._outputChannel.appendLine(`[ollama-dev] Endpoint: ${endpoint}/api/chat`);
-		this._outputChannel.appendLine(`[ollama-dev] ───────────────────────────────────────────────────────────────`);
+		this._outputChannel.appendLine(`[ollama-dev] ----------------------------------------------------------------------`);
 
 		// Log request options
 		this._outputChannel.appendLine(`[ollama-dev] OPTIONS:`);
@@ -641,7 +1018,7 @@ class OllamaLanguageModelProvider implements vscode.Disposable {
 		if (options.tools && options.tools.length > 0) {
 			this._outputChannel.appendLine(`[ollama-dev]   Tools: ${options.tools.map(t => t.name).join(', ')}`);
 		}
-		this._outputChannel.appendLine(`[ollama-dev] ───────────────────────────────────────────────────────────────`);
+		this._outputChannel.appendLine(`[ollama-dev] ----------------------------------------------------------------------`);
 
 		// Log message summary
 		this._outputChannel.appendLine(`[ollama-dev] MESSAGES (${messages.length} total):`);
@@ -664,7 +1041,7 @@ class OllamaLanguageModelProvider implements vscode.Disposable {
 			}
 			this._outputChannel.appendLine(`[ollama-dev]   [${idx}] ${roleName}: ${partTypes.join(', ')} - "${contentPreview}${contentPreview.length >= 100 ? '...' : ''}"`);
 		});
-		this._outputChannel.appendLine(`[ollama-dev] ───────────────────────────────────────────────────────────────`);
+		this._outputChannel.appendLine(`[ollama-dev] ----------------------------------------------------------------------`);
 
 		// First pass: collect tool call information to map callId -> toolName
 		// This is needed because tool results reference callId but Ollama needs tool_name
@@ -776,6 +1153,11 @@ class OllamaLanguageModelProvider implements vscode.Disposable {
 			return result;
 		});
 
+		const normalizedOllamaMessages = normalizeMessagesForAlternatingTemplate(ollamaMessages, this._outputChannel);
+		if (normalizedOllamaMessages.length !== ollamaMessages.length) {
+			this._outputChannel.appendLine(`[ollama-dev] Normalized messages for llama.cpp template constraints: ${ollamaMessages.length} -> ${normalizedOllamaMessages.length}`);
+		}
+
 		// Convert VS Code tools to Ollama format
 		const ollamaTools: OllamaTool[] | undefined = options.tools?.map(tool => {
 			const inputSchema = tool.inputSchema as { properties?: Record<string, unknown>; required?: string[] } | undefined;
@@ -804,6 +1186,75 @@ class OllamaLanguageModelProvider implements vscode.Disposable {
 				}
 			};
 		});
+
+		const toolNameToParams = new Map<string, { required?: string[]; properties?: Record<string, unknown> }>();
+		for (const t of options.tools ?? []) {
+			const inputSchema = t.inputSchema as { properties?: Record<string, unknown>; required?: string[] } | undefined;
+			toolNameToParams.set(t.name, {
+				required: inputSchema?.required,
+				properties: inputSchema?.properties
+			});
+		}
+
+		const inferToolNameFromRawArgs = (rawArgsStr: string): string | undefined => {
+			let bestName: string | undefined;
+			let bestScore = 0;
+			for (const [name, params] of toolNameToParams) {
+				let score = 0;
+				const keys = new Set<string>();
+				if (params.required) {
+					for (const k of params.required) {
+						keys.add(k);
+					}
+				}
+				if (params.properties) {
+					for (const k of Object.keys(params.properties)) {
+						keys.add(k);
+					}
+				}
+				for (const k of keys) {
+					if (rawArgsStr.includes(`"${k}"`) || rawArgsStr.includes(`${k}`)) {
+						score++;
+					}
+				}
+				if (score > bestScore) {
+					bestScore = score;
+					bestName = name;
+				}
+			}
+			return bestName;
+		};
+
+		const coerceToolArgsToObject = (rawArgs: unknown, toolName: string | undefined): Record<string, unknown> => {
+			let parsed: unknown = rawArgs ?? {};
+			if (typeof rawArgs === 'string') {
+				try {
+					parsed = rawArgs ? JSON.parse(rawArgs) : {};
+				} catch {
+					parsed = rawArgs;
+				}
+			}
+
+			if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+				return parsed as Record<string, unknown>;
+			}
+
+			const params = toolName ? toolNameToParams.get(toolName) : undefined;
+			const raw = typeof parsed === 'string' ? parsed : (typeof rawArgs === 'string' ? rawArgs : JSON.stringify(rawArgs));
+			if (params?.required && params.required.length > 0) {
+				const obj: Record<string, unknown> = {};
+				for (const key of params.required) {
+					obj[key] = raw ?? '';
+				}
+				return obj;
+			}
+			if (params?.properties && Object.hasOwn(params.properties, 'query')) {
+				return { query: raw ?? '' };
+			}
+
+			// Last resort: wrap in a value field so the payload is always an object
+			return { value: raw ?? '' };
+		};
 
 		// Extract model options from VS Code's modelOptions
 		const modelOpts = options.modelOptions as Record<string, unknown> | undefined;
@@ -834,13 +1285,13 @@ class OllamaLanguageModelProvider implements vscode.Disposable {
 
 		const requestBody: OllamaChatRequest = {
 			model: model.ollamaName,
-			messages: ollamaMessages,
+			messages: normalizedOllamaMessages,
 			stream: true,
 			tools: ollamaTools,
 			keep_alive: '30m',  // Keep model loaded for 30 minutes to avoid reload delays
 			...(isThinkingModel && { think: true }),  // Enable thinking for thinking models
 			options: {
-				num_ctx: 131072,  // Request 128K context window from Ollama
+				num_ctx: 65536,  // Request 64K context window from Ollama (was 131072)
 				num_predict: 16384,  // Max output tokens - matches maxOutputTokens
 				...(temperature !== undefined && { temperature }),
 				...(seed !== undefined && { seed }),
@@ -863,21 +1314,71 @@ class OllamaLanguageModelProvider implements vscode.Disposable {
 		} else {
 			this._outputChannel.appendLine(`[ollama-dev]   Tools: NONE - Model will not be able to use tools!`);
 		}
-		this._outputChannel.appendLine(`[ollama-dev] ───────────────────────────────────────────────────────────────`);
+		this._outputChannel.appendLine(`[ollama-dev] ----------------------------------------------------------------------`);
 
-		const requestStartTime = Date.now();
+		let lastAttemptStart = Date.now();
 
-		try {
+		const runStream = async (useTools: boolean) => {
+			const startTime = Date.now();
+			lastAttemptStart = startTime;
 			let toolCallIdCounter = 0;
 			let firstTokenReceived = false;
 			let textTokenCount = 0;
 			let toolCallCount = 0;
 			let accumulatedContent = '';  // Accumulate content for Qwen3-Coder XML parsing
 			const isQwen3Coder = isQwen3CoderModel(model.ollamaName);
+			const body = useTools ? requestBody : { ...requestBody, tools: undefined };
+			const toolIndexToCallId = new Map<number, string>();
+			const pendingToolCalls = new Map<number, { name?: string; argsFragments: string[]; argsObject?: Record<string, unknown>; emitted: boolean }>();
+			let nextToolIndex = 0;
 
-			this._outputChannel.appendLine(`[ollama-dev] STREAMING RESPONSE...`);
+			const emitToolCall = (callId: string, toolName: string, rawArgs: unknown) => {
+				const argsObj = coerceToolArgsToObject(rawArgs, toolName);
+				if (!Object.hasOwn(argsObj, 'explanation')) {
+					const argsPreview = Object.keys(argsObj).slice(0, 3).join(', ');
+					argsObj['explanation'] = `Calling ${toolName}${argsPreview ? ` with ${argsPreview}` : ''}`;
+				}
+				this._outputChannel.appendLine(`[ollama-dev]     -> ${toolName}(${JSON.stringify(argsObj).substring(0, 200)}${JSON.stringify(argsObj).length > 200 ? '...' : ''})`);
+				progress.report(new vscode.LanguageModelToolCallPart(callId, toolName, argsObj));
+			};
+
+			const flushPendingToolCalls = (reason: string) => {
+				if (pendingToolCalls.size === 0) {
+					return;
+				}
+				this._outputChannel.appendLine(`[ollama-dev]   [tool] Flushing ${pendingToolCalls.size} pending tool call(s) (reason=${reason})`);
+				for (const [idx, pending] of pendingToolCalls) {
+					if (pending.emitted) {
+						continue;
+					}
+					let toolName = pending.name?.trim();
+					const rawArgsStr = pending.argsFragments.join('');
+					if (!toolName && rawArgsStr) {
+						toolName = inferToolNameFromRawArgs(rawArgsStr);
+						if (toolName) {
+							this._outputChannel.appendLine(`[ollama-dev]     [!] Inferred tool name '${toolName}' for tool_call[${idx}] from arguments.`);
+						}
+					}
+					if (!toolName) {
+						this._outputChannel.appendLine(`[ollama-dev]     [!] Skipping tool_call[${idx}] because function name is missing.`);
+						continue;
+					}
+					const callId = toolIndexToCallId.get(idx) ?? `ollama-tool-${toolCallIdCounter++}`;
+					toolIndexToCallId.set(idx, callId);
+					const rawArgs = pending.argsObject ?? rawArgsStr;
+					emitToolCall(callId, toolName, rawArgs);
+					toolCallCount++;
+					pending.emitted = true;
+				}
+				pendingToolCalls.clear();
+			};
+
+			this._outputChannel.appendLine(`[ollama-dev] STREAMING RESPONSE...${useTools ? '' : ' (tools disabled)'}`);
 			if (isQwen3Coder) {
 				this._outputChannel.appendLine(`[ollama-dev]   [*] Qwen3-Coder detected - will parse XML tool call format`);
+			}
+			if (!useTools) {
+				this._outputChannel.appendLine(`[ollama-dev]   [!] Tools disabled because model reported lack of tool support.`);
 			}
 
 			await httpStreamRequest(
@@ -885,7 +1386,7 @@ class OllamaLanguageModelProvider implements vscode.Disposable {
 				{
 					method: 'POST',
 					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify(requestBody)
+					body: JSON.stringify(body)
 				},
 				(chunk: string) => {
 					const lines = chunk.split('\n').filter((line: string) => line.trim());
@@ -896,7 +1397,7 @@ class OllamaLanguageModelProvider implements vscode.Disposable {
 							// Track time to first token
 							if (!firstTokenReceived && (parsed.message?.content || parsed.message?.tool_calls)) {
 								firstTokenReceived = true;
-								const timeToFirstToken = Date.now() - requestStartTime;
+								const timeToFirstToken = Date.now() - startTime;
 								this._outputChannel.appendLine(`[ollama-dev]   Time to first token: ${timeToFirstToken}ms`);
 							}
 
@@ -927,32 +1428,44 @@ class OllamaLanguageModelProvider implements vscode.Disposable {
 
 							// Handle standard Ollama tool calls (non-Qwen3-Coder models)
 							if (parsed.message?.tool_calls && parsed.message.tool_calls.length > 0) {
-								toolCallCount += parsed.message.tool_calls.length;
-								this._outputChannel.appendLine(`[ollama-dev]   🔧 Received ${parsed.message.tool_calls.length} tool call(s)`);
+								this._outputChannel.appendLine(`[ollama-dev]   [tool] Received ${parsed.message.tool_calls.length} tool call(s)`);
 								for (const toolCall of parsed.message.tool_calls) {
-									const callId = `ollama-tool-${toolCallIdCounter++}`;
-									const toolArgs = toolCall.function.arguments;
-
-									// Ensure tool call arguments have required 'explanation' field
-									// Many VS Code tools require this field, and Ollama models sometimes omit it
-									if (toolArgs && typeof toolArgs === 'object' && !Object.hasOwn(toolArgs, 'explanation')) {
-										// Auto-generate an explanation from the tool name and args
-										const argsPreview = Object.keys(toolArgs).slice(0, 3).join(', ');
-										(toolArgs as Record<string, unknown>)['explanation'] = `Calling ${toolCall.function.name} with ${argsPreview}`;
-										this._outputChannel.appendLine(`[ollama-dev]     [!] Added missing 'explanation' field`);
+									const rawName = toolCall.function?.name?.trim();
+									const idx = typeof toolCall.function?.index === 'number' ? toolCall.function.index : nextToolIndex++;
+									let callId = toolIndexToCallId.get(idx);
+									if (!callId) {
+										callId = `ollama-tool-${toolCallIdCounter++}`;
+										toolIndexToCallId.set(idx, callId);
 									}
 
-									this._outputChannel.appendLine(`[ollama-dev]     → ${toolCall.function.name}(${JSON.stringify(toolArgs).substring(0, 200)}${JSON.stringify(toolArgs).length > 200 ? '...' : ''})`);
-									progress.report(new vscode.LanguageModelToolCallPart(
-										callId,
-										toolCall.function.name,
-										toolArgs
-									));
+									let pending = pendingToolCalls.get(idx);
+									if (!pending) {
+										pending = { name: rawName || undefined, argsFragments: [], emitted: false };
+										pendingToolCalls.set(idx, pending);
+									} else if (rawName) {
+										pending.name = rawName;
+									}
+
+									const rawArgs = (toolCall.function as unknown as { arguments?: unknown })?.arguments;
+									if (typeof rawArgs === 'string') {
+										pending.argsFragments.push(rawArgs);
+									} else if (rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs)) {
+										pending.argsObject = rawArgs as Record<string, unknown>;
+									}
+
+									// Emit immediately only when we have a non-empty name and a valid object args.
+									// Otherwise buffer and flush when the stream completes.
+									if (!pending.emitted && pending.name && pending.argsObject) {
+										emitToolCall(callId, pending.name, pending.argsObject);
+										pending.emitted = true;
+										toolCallCount++;
+									}
 								}
 							}
 
 							// When response is complete, parse any Qwen3-Coder XML tool calls
 							if (parsed.done) {
+								flushPendingToolCalls('done');
 								// Parse Qwen3-Coder XML tool calls from accumulated content
 								if (isQwen3Coder && accumulatedContent.includes('<tool_call>')) {
 									this._outputChannel.appendLine(`[ollama-dev]   Parsing Qwen3-Coder XML tool calls...`);
@@ -973,7 +1486,7 @@ class OllamaLanguageModelProvider implements vscode.Disposable {
 												this._outputChannel.appendLine(`[ollama-dev]     [!] Added missing 'explanation' field`);
 											}
 
-											this._outputChannel.appendLine(`[ollama-dev]     → ${toolCall.name}(${JSON.stringify(toolArgs).substring(0, 200)}${JSON.stringify(toolArgs).length > 200 ? '...' : ''})`);
+											this._outputChannel.appendLine(`[ollama-dev]     -> ${toolCall.name}(${JSON.stringify(toolArgs).substring(0, 200)}${JSON.stringify(toolArgs).length > 200 ? '...' : ''})`);
 											progress.report(new vscode.LanguageModelToolCallPart(
 												callId,
 												toolCall.name,
@@ -984,17 +1497,17 @@ class OllamaLanguageModelProvider implements vscode.Disposable {
 										// Stream any content that was before the first tool call
 										const preToolContent = accumulatedContent.split('<tool_call>')[0].trim();
 										if (preToolContent) {
-											this._outputChannel.appendLine(`[ollama-dev]   📝 Pre-tool content: ${preToolContent.substring(0, 100)}...`);
+											this._outputChannel.appendLine(`[ollama-dev]   Pre-tool content: ${preToolContent.substring(0, 100)}...`);
 											// Note: We already streamed this content above for non-tool-call parts
 										}
 									} else {
-										this._outputChannel.appendLine(`[ollama-dev]   ⚠️ Found <tool_call> tags but failed to parse any tool calls`);
+										this._outputChannel.appendLine(`[ollama-dev]   WARNING: Found <tool_call> tags but failed to parse any tool calls`);
 										this._outputChannel.appendLine(`[ollama-dev]   Content preview: ${accumulatedContent.substring(0, 500)}`);
 									}
 								}
 
-								const totalDuration = Date.now() - requestStartTime;
-								this._outputChannel.appendLine(`[ollama-dev] ───────────────────────────────────────────────────────────────`);
+								const totalDuration = Date.now() - startTime;
+								this._outputChannel.appendLine(`[ollama-dev] ----------------------------------------------------------------------`);
 								this._outputChannel.appendLine(`[ollama-dev] RESPONSE COMPLETE (${requestId})`);
 								this._outputChannel.appendLine(`[ollama-dev]   Total Duration: ${totalDuration}ms`);
 								this._outputChannel.appendLine(`[ollama-dev]   Text Chunks: ${textTokenCount}`);
@@ -1018,7 +1531,7 @@ class OllamaLanguageModelProvider implements vscode.Disposable {
 										this._outputChannel.appendLine(`[ollama-dev]     - Speed: ${tokensPerSecond.toFixed(1)} tokens/sec`);
 									}
 								}
-								this._outputChannel.appendLine(`[ollama-dev] ═══════════════════════════════════════════════════════════════\n`);
+								this._outputChannel.appendLine(`[ollama-dev] ======================================================================\n`);
 							}
 						} catch {
 							// Skip malformed JSON lines
@@ -1028,14 +1541,408 @@ class OllamaLanguageModelProvider implements vscode.Disposable {
 				token,
 				this._outputChannel
 			);
+		};
 
+		try {
+			await runStream(true);
 		} catch (error) {
-			const errorDuration = Date.now() - requestStartTime;
-			this._outputChannel.appendLine(`[ollama-dev] ───────────────────────────────────────────────────────────────`);
+			const errorDuration = Date.now() - lastAttemptStart;
+			const message = error instanceof Error ? error.message : String(error);
+			this._outputChannel.appendLine(`[ollama-dev] Request failed after ${errorDuration}ms: ${message}`);
+			if (message.toLowerCase().includes('does not support tools')) {
+				this._outputChannel.appendLine(`[ollama-dev] Model reported it does not support tools. Retrying without tools...`);
+				await runStream(false);
+				return;
+			}
+
+			this._outputChannel.appendLine(`[ollama-dev] ----------------------------------------------------------------------`);
 			this._outputChannel.appendLine(`[ollama-dev] REQUEST FAILED (${requestId})`);
 			this._outputChannel.appendLine(`[ollama-dev]   Duration: ${errorDuration}ms`);
 			this._outputChannel.appendLine(`[ollama-dev]   Error: ${error}`);
-			this._outputChannel.appendLine(`[ollama-dev] ═══════════════════════════════════════════════════════════════\n`);
+			this._outputChannel.appendLine(`[ollama-dev] ======================================================================\n`);
+			throw error;
+		}
+	}
+
+	private async provideLlamaCppChatResponse(
+		model: OllamaModelInfo,
+		messages: readonly vscode.LanguageModelChatRequestMessage[],
+		options: vscode.ProvideLanguageModelChatResponseOptions,
+		progress: vscode.Progress<vscode.LanguageModelResponsePart2>,
+		token: vscode.CancellationToken
+	): Promise<void> {
+		const endpoint = this.getEndpoint();
+		const requestId = `req-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 7)}`;
+		const temperature = options.modelOptions?.temperature ?? 0.15;
+		const maxTokens = model.maxOutputTokens ?? 16384;
+		const toolCallIdToName = new Map<string, string>();
+
+		// Convert VS Code messages to OpenAI chat format.
+		// IMPORTANT: llama.cpp's chat template for this model enforces that user/assistant roles alternate,
+		// except that assistant messages *with tool_calls* and tool result messages are excluded from the
+		// alternation check. Therefore we must encode VS Code tool calls as OpenAI `tool_calls`.
+		const oaMessages: OpenAIChatMessage[] = [];
+		for (const msg of messages) {
+			let textContent = '';
+			const toolCalls: NonNullable<OpenAIChatMessage['tool_calls']> = [];
+			const toolResults: { callId: string; content: string }[] = [];
+
+			for (const part of msg.content) {
+				if (part instanceof vscode.LanguageModelTextPart) {
+					textContent += part.value;
+				} else if (part instanceof vscode.LanguageModelToolCallPart) {
+					toolCallIdToName.set(part.callId, part.name);
+					toolCalls.push({
+						id: part.callId,
+						type: 'function',
+						function: {
+							name: part.name,
+							arguments: JSON.stringify(part.input ?? {})
+						}
+					});
+				} else if (part instanceof vscode.LanguageModelToolResultPart) {
+					const resultContent = part.content.map(c => c instanceof vscode.LanguageModelTextPart ? c.value : '').join('');
+					toolResults.push({ callId: part.callId, content: resultContent });
+				}
+			}
+
+			const role: OpenAIChatMessage['role'] = msg.role === vscode.LanguageModelChatMessageRole.User ? 'user' :
+				msg.role === vscode.LanguageModelChatMessageRole.Assistant ? 'assistant' : 'system';
+
+			// Do not create empty placeholder messages unless they contain tool calls.
+			const hasContent = !!textContent;
+			const hasToolCalls = toolCalls.length > 0;
+			const shouldEmitBaseMessage = role === 'system' || hasContent || hasToolCalls;
+
+			if (shouldEmitBaseMessage) {
+				const last = oaMessages[oaMessages.length - 1];
+				const lastHasToolCalls = !!(last?.tool_calls && last.tool_calls.length > 0);
+				// Merge only simple consecutive text-only messages. Never merge into/out of a tool_calls message.
+				if (
+					last &&
+					last.role === role &&
+					last.tool_call_id === undefined &&
+					!lastHasToolCalls &&
+					!hasToolCalls
+				) {
+					const mergedContent = ((last.content as string | null) || '') + (textContent ? `\n${textContent}` : '');
+					last.content = mergedContent || null;
+				} else {
+					const base: OpenAIChatMessage = { role, content: hasContent ? textContent : null };
+					if (hasToolCalls) {
+						base.tool_calls = toolCalls;
+					}
+					oaMessages.push(base);
+				}
+			}
+
+			for (const toolResult of toolResults) {
+				oaMessages.push({
+					role: 'tool',
+					tool_call_id: toolResult.callId,
+					name: toolCallIdToName.get(toolResult.callId),
+					content: toolResult.content
+				});
+			}
+		}
+
+		const oaTools: OllamaTool[] | undefined = options.tools?.map(tool => {
+			const inputSchema = tool.inputSchema as { properties?: Record<string, unknown>; required?: string[] } | undefined;
+			let required = inputSchema?.required ? [...inputSchema.required] : [];
+			const properties = inputSchema?.properties ? { ...inputSchema.properties } : {};
+			if (properties['explanation'] && !required.includes('explanation')) {
+				required = ['explanation', ...required];
+			}
+			return {
+				type: 'function',
+				function: {
+					name: tool.name,
+					description: tool.description || tool.name,
+					parameters: {
+						type: 'object',
+						properties,
+						required: required.length > 0 ? required : undefined
+					}
+				}
+			};
+		});
+
+		const normalizedOaMessages = normalizeOpenAIMessagesForAlternatingTemplate(oaMessages, this._outputChannel);
+		if (normalizedOaMessages.length !== oaMessages.length) {
+			this._outputChannel.appendLine(`[ollama-dev] Normalized OpenAI messages for llama.cpp template constraints: ${oaMessages.length} -> ${normalizedOaMessages.length}`);
+		}
+		const alternationViolation = getLlamaCppAlternationViolation(normalizedOaMessages);
+		if (alternationViolation) {
+			const trace = normalizedOaMessages.slice(0, 50).map((m, i) => {
+				const hasToolCalls = m.role === 'assistant' && !!(m.tool_calls && m.tool_calls.length > 0);
+				const toolId = m.role === 'tool' ? (m.tool_call_id ?? '?') : '';
+				return `[${i}] ${m.role}${hasToolCalls ? '(tool_calls)' : ''}${toolId ? `(${toolId})` : ''}`;
+			}).join(' ');
+			this._outputChannel.appendLine(`[ollama-dev] WARNING: ${alternationViolation}`);
+			this._outputChannel.appendLine(`[ollama-dev] WARNING: Role trace (first 50): ${trace}`);
+		}
+
+		const toolNameToParams = new Map<string, { required?: string[]; properties?: Record<string, unknown> }>();
+		for (const t of oaTools ?? []) {
+			toolNameToParams.set(t.function.name, t.function.parameters);
+		}
+
+		const requestBody: OpenAIChatRequest = {
+			model: model.ollamaName,
+			messages: normalizedOaMessages,
+			stream: true,
+			tools: oaTools,
+			temperature,
+			max_tokens: maxTokens
+		};
+
+		const pendingToolCalls = new Map<number, { id: string; name?: string; args: string[] }>();
+		const coerceToolArgs = (rawArgsStr: string, toolName: string | undefined): Record<string, unknown> => {
+			let parsed: unknown = {};
+			try {
+				parsed = rawArgsStr ? JSON.parse(rawArgsStr) : {};
+			} catch {
+				parsed = rawArgsStr;
+			}
+
+			if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+				return parsed as Record<string, unknown>;
+			}
+
+			const params = toolName ? toolNameToParams.get(toolName) : undefined;
+			const raw = typeof parsed === 'string' ? parsed : rawArgsStr;
+			if (params?.required && params.required.length > 0) {
+				const obj: Record<string, unknown> = {};
+				for (const key of params.required) {
+					obj[key] = raw ?? '';
+				}
+				return obj;
+			}
+			if (params?.properties && Object.hasOwn(params.properties, 'query')) {
+				return { query: raw ?? '' };
+			}
+
+			// Last resort: wrap in a value field so the payload is always an object
+			return { value: raw ?? '' };
+		};
+
+		const inferToolNameFromRaw = (rawArgsStr: string): string | undefined => {
+			let bestName: string | undefined;
+			let bestScore = 0;
+			for (const [name, params] of toolNameToParams) {
+				let score = 0;
+				const keys = new Set<string>();
+				if (params.required) {
+					for (const k of params.required) {
+						keys.add(k);
+					}
+				}
+				if (params.properties) {
+					for (const k of Object.keys(params.properties)) {
+						keys.add(k);
+					}
+				}
+				for (const k of keys) {
+					if (rawArgsStr.includes(`"${k}"`) || rawArgsStr.includes(`${k}`)) {
+						score++;
+					}
+				}
+				if (score > bestScore) {
+					bestScore = score;
+					bestName = name;
+				}
+			}
+			return bestName;
+		};
+
+		const flushPendingToolCalls = (reason: string) => {
+			if (pendingToolCalls.size === 0) {
+				return;
+			}
+			this._outputChannel.appendLine(`[ollama-dev] (llama.cpp) Flushing ${pendingToolCalls.size} pending tool call(s) on finish_reason=${reason}`);
+			for (const [idx, pending] of pendingToolCalls) {
+				const rawArgsStr = pending.args.join('');
+				let toolName = pending.name?.trim() || toolIndexToExplicitName.get(idx) || toolIndexToName.get(idx);
+				if (!toolName) {
+					toolName = inferToolNameFromRaw(rawArgsStr);
+					if (toolName) {
+						this._outputChannel.appendLine(`[ollama-dev] (llama.cpp) Inferred tool name '${toolName}' for tool_call[${idx}] from arguments.`);
+					}
+				}
+				if (!toolName) {
+					this._outputChannel.appendLine(`[ollama-dev] (llama.cpp) Skipping tool_call[${idx}] because function name is missing.`);
+					continue;
+				}
+				if (pending.args.length === 0) {
+					this._outputChannel.appendLine(`[ollama-dev] (llama.cpp) Skipping tool_call[${idx}] (${toolName}) because no argument fragments were received.`);
+					continue;
+				}
+				const argsObj = coerceToolArgs(rawArgsStr, toolName);
+
+				if (!Object.hasOwn(argsObj, 'explanation')) {
+					const argsPreview = Object.keys(argsObj).slice(0, 3).join(', ');
+					argsObj['explanation'] = `Calling ${toolName}${argsPreview ? ` with ${argsPreview}` : ''}`;
+				}
+
+				progress.report(new vscode.LanguageModelToolCallPart(pending.id, toolName, argsObj));
+				this._outputChannel.appendLine(`[ollama-dev] (llama.cpp) -> tool_call[${idx}] ${toolName}(${JSON.stringify(argsObj).substring(0, 200)}${JSON.stringify(argsObj).length > 200 ? '...' : ''})`);
+			}
+			pendingToolCalls.clear();
+		};
+
+		this._outputChannel.appendLine(`[ollama-dev] (llama.cpp) REQUEST ${requestId}`);
+		this._outputChannel.appendLine(`[ollama-dev] Patch: ${LLAMA_CPP_PATCH_MARKER}`);
+		this._outputChannel.appendLine(`[ollama-dev] Endpoint: ${endpoint}/v1/chat/completions`);
+		this._outputChannel.appendLine(`[ollama-dev] Model: ${model.name}`);
+		this._outputChannel.appendLine(`[ollama-dev] Messages: raw=${oaMessages.length}, final=${normalizedOaMessages.length}`);
+		this._outputChannel.appendLine(`[ollama-dev] Tools: ${oaTools?.length ?? 0}`);
+		const roleTrace = normalizedOaMessages.slice(0, 120).map((m, i) => {
+			const toolCallsLen = m.role === 'assistant' && m.tool_calls ? m.tool_calls.length : 0;
+			const hasToolCallsProp = m.role === 'assistant' && Object.prototype.hasOwnProperty.call(m, 'tool_calls');
+			return `[${i}] ${m.role}${toolCallsLen ? `(tool_calls:${toolCallsLen})` : ''}${hasToolCallsProp && !toolCallsLen ? '(tool_calls:0)' : ''}`;
+		}).join(' ');
+		this._outputChannel.appendLine(`[ollama-dev] Role trace (first 120): ${roleTrace}`);
+		this._outputChannel.appendLine(`[ollama-dev] ----------------------------------------------------------------------`);
+
+		let toolCallCounter = 0;
+		const toolIndexToId = new Map<number, string>();
+		const toolIdToIndex = new Map<string, number>();
+		const toolIndexToName = new Map<number, string>();
+		const toolIndexToExplicitName = new Map<number, string>();
+		let lastOpenToolIndex: number | undefined;
+		const startTime = Date.now();
+
+		try {
+			await httpStreamRequest(
+				`${endpoint}/v1/chat/completions`,
+				{
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify(requestBody)
+				},
+				(chunk: string) => {
+					const lines = chunk.split('\n').filter((line: string) => line.trim().startsWith('data:'));
+					for (const line of lines) {
+						const payload = line.replace(/^data:\s*/, '').trim();
+						if (!payload || payload === '[DONE]') {
+							continue;
+						}
+						try {
+							const parsed = JSON.parse(payload) as OpenAIStreamChunk;
+							const choice = parsed.choices?.[0];
+							const delta = choice?.delta;
+
+							if (delta?.content) {
+								progress.report(new vscode.LanguageModelTextPart(delta.content));
+							}
+
+							if (delta?.tool_calls && delta.tool_calls.length > 0) {
+								for (const toolCall of delta.tool_calls) {
+									const rawName = toolCall.function?.name?.trim();
+									const rawArgs = toolCall.function?.arguments ?? '';
+									this._outputChannel.appendLine(`[ollama-dev] (llama.cpp) delta tool_call id=${toolCall.id ?? '?'} index=${typeof toolCall.index === 'number' ? toolCall.index : '?'} name=${rawName ?? ''} argsLen=${rawArgs.length}`);
+
+									let idx: number | undefined;
+									if (toolCall.id && toolIdToIndex.has(toolCall.id)) {
+										idx = toolIdToIndex.get(toolCall.id)!;
+									} else if (typeof toolCall.index === 'number') {
+										idx = toolCall.index;
+									} else if (lastOpenToolIndex !== undefined) {
+										idx = lastOpenToolIndex;
+									}
+									if (idx === undefined) {
+										idx = toolCallCounter++;
+									} else {
+										toolCallCounter = Math.max(toolCallCounter, idx + 1);
+									}
+
+									let callId = toolCall.id || toolIndexToId.get(idx);
+									if (!callId) {
+										callId = `llama-tool-${idx}`;
+									}
+
+									toolIndexToId.set(idx, callId);
+									if (toolCall.id) {
+										toolIdToIndex.set(toolCall.id, idx);
+									}
+									lastOpenToolIndex = idx;
+
+									let pending = pendingToolCalls.get(idx);
+									if (!pending) {
+										const inferredName = rawName || toolIndexToName.get(idx) || inferToolNameFromRaw(rawArgs);
+										pending = { id: callId, name: inferredName, args: [] };
+										if (pending.name) {
+											toolIndexToName.set(idx, pending.name);
+										}
+										pendingToolCalls.set(idx, pending);
+									}
+
+									if (rawName) {
+										pending.name = rawName;
+										toolIndexToName.set(idx, rawName);
+										toolIndexToExplicitName.set(idx, rawName);
+									} else if (!pending.name) {
+										const inferredName = inferToolNameFromRaw(rawArgs);
+										if (inferredName) {
+											pending.name = inferredName;
+											toolIndexToName.set(idx, inferredName);
+										}
+									}
+
+									if (rawArgs) {
+										pending.args.push(rawArgs);
+									}
+								}
+							}
+
+
+							if (choice?.finish_reason && pendingToolCalls.size > 0) {
+								flushPendingToolCalls(choice.finish_reason);
+								lastOpenToolIndex = undefined;
+							}
+
+							if (choice?.finish_reason) {
+								const totalDuration = Date.now() - startTime;
+								this._outputChannel.appendLine(`[ollama-dev] (llama.cpp) RESPONSE COMPLETE (${requestId})`);
+								this._outputChannel.appendLine(`[ollama-dev]   Finish reason: ${choice.finish_reason}`);
+								if (parsed.usage) {
+									this._outputChannel.appendLine(`[ollama-dev]   Usage: prompt=${parsed.usage.prompt_tokens ?? 0}, completion=${parsed.usage.completion_tokens ?? 0}, total=${parsed.usage.total_tokens ?? 0}`);
+								}
+								this._outputChannel.appendLine(`[ollama-dev]   Duration: ${totalDuration}ms`);
+							}
+						} catch (err) {
+							// Skip malformed chunks
+						}
+					}
+				},
+				token,
+				this._outputChannel
+			);
+
+			if (pendingToolCalls.size > 0) {
+				flushPendingToolCalls('stream-end');
+				lastOpenToolIndex = undefined;
+			}
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this._outputChannel.appendLine(`[ollama-dev] (llama.cpp) REQUEST FAILED (${requestId})`);
+			this._outputChannel.appendLine(`[ollama-dev] Patch: ${LLAMA_CPP_PATCH_MARKER}`);
+			this._outputChannel.appendLine(`[ollama-dev] Error: ${message}`);
+			if (pendingToolCalls.size > 0) {
+				flushPendingToolCalls('error');
+				lastOpenToolIndex = undefined;
+			}
+			const finalViolation = getLlamaCppAlternationViolation(normalizedOaMessages);
+			this._outputChannel.appendLine(`[ollama-dev] Final alternation check: ${finalViolation ?? 'ok'}`);
+			const trace = normalizedOaMessages.slice(0, 80).map((m, i) => {
+				const toolCallsLen = m.role === 'assistant' && m.tool_calls ? m.tool_calls.length : 0;
+				const hasToolCalls = m.role === 'assistant' && toolCallsLen > 0;
+				const hasToolCallsProp = m.role === 'assistant' && Object.prototype.hasOwnProperty.call(m, 'tool_calls');
+				const toolId = m.role === 'tool' ? (m.tool_call_id ?? '?') : '';
+				const extra = m.role === 'assistant' ? `${hasToolCalls ? '(tool_calls)' : ''}${hasToolCallsProp && toolCallsLen === 0 ? '(tool_calls:0)' : ''}` : '';
+				return `[${i}] ${m.role}${extra}${toolId ? `(${toolId})` : ''}`;
+			}).join(' ');
+			this._outputChannel.appendLine(`[ollama-dev] Final role trace (first 80): ${trace}`);
 			throw error;
 		}
 	}
@@ -1070,6 +1977,15 @@ let outputChannel: vscode.OutputChannel | undefined;
  */
 async function silentConnect(): Promise<boolean> {
 	const config = vscode.workspace.getConfiguration();
+	const connectionMode = (config.get<string>(OLLAMA_CONNECTION_MODE_CONFIG) as ConnectionMode) || 'ssh';
+	const localEndpoint = config.get<string>(OLLAMA_LOCAL_ENDPOINT_CONFIG) || 'http://127.0.0.1:11434';
+
+	if (connectionMode === 'local') {
+		outputChannel?.appendLine(`[ollama-dev] Connection mode is 'local' - using ${localEndpoint}`);
+		provider?.setConnectionMode('local', localEndpoint);
+		return true;
+	}
+
 	const remoteHost = config.get<string>(OLLAMA_REMOTE_HOST_CONFIG);
 
 	if (!remoteHost) {
@@ -1087,6 +2003,7 @@ async function silentConnect(): Promise<boolean> {
 	if (connected) {
 		outputChannel?.appendLine(`[ollama-dev] Auto-connected to ${remoteHost}`);
 		provider!.setLocalPort(localPort);
+		provider!.setConnectionMode('ssh');
 		return true;
 	} else {
 		outputChannel?.appendLine(`[ollama-dev] Auto-connect failed for ${remoteHost}`);
@@ -1096,6 +2013,14 @@ async function silentConnect(): Promise<boolean> {
 
 async function promptAndConnect(context: vscode.ExtensionContext): Promise<boolean> {
 	const config = vscode.workspace.getConfiguration();
+	const connectionMode = (config.get<string>(OLLAMA_CONNECTION_MODE_CONFIG) as ConnectionMode) || 'ssh';
+
+	if (connectionMode === 'local') {
+		const endpoint = config.get<string>(OLLAMA_LOCAL_ENDPOINT_CONFIG) || 'http://127.0.0.1:11434';
+		provider?.setConnectionMode('local', endpoint);
+		vscode.window.showInformationMessage(`Ollama: Using local endpoint ${endpoint}`);
+		return true;
+	}
 
 	// Get stored or prompt for remote host
 	let remoteHost = config.get<string>(OLLAMA_REMOTE_HOST_CONFIG);
@@ -1147,6 +2072,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	context.subscriptions.push(outputChannel);
 
 	outputChannel.appendLine('[ollama-dev] Activating Ollama language model provider');
+	outputChannel.appendLine(`[ollama-dev] Patch: ${LLAMA_CPP_PATCH_MARKER} (source=${__filename})`);
 
 	sshTunnel = new SshTunnel(outputChannel);
 	context.subscriptions.push(sshTunnel);
@@ -1169,6 +2095,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			await config.update(OLLAMA_REMOTE_HOST_CONFIG, undefined, vscode.ConfigurationTarget.Global);
 			sshTunnel?.disconnect();
 			await promptAndConnect(context);
+		}),
+		vscode.commands.registerCommand('ollamaDev.toggleConnectionMode', async () => {
+			const config = vscode.workspace.getConfiguration();
+			const current = (config.get<string>(OLLAMA_CONNECTION_MODE_CONFIG) as ConnectionMode) || 'ssh';
+			const next = current === 'ssh' ? 'local' : 'ssh';
+			await config.update(OLLAMA_CONNECTION_MODE_CONFIG, next, vscode.ConfigurationTarget.Global);
+			if (next === 'local') {
+				const endpoint = config.get<string>(OLLAMA_LOCAL_ENDPOINT_CONFIG) || 'http://127.0.0.1:11434';
+				provider?.setConnectionMode('local', endpoint);
+				sshTunnel?.disconnect();
+				vscode.window.showInformationMessage(`Ollama: Switched to local mode (${endpoint})`);
+			} else {
+				vscode.window.showInformationMessage('Ollama: Switched to SSH mode. Use "Ollama: Connect to Remote" to connect.');
+			}
 		})
 	);
 
