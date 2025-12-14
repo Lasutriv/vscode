@@ -1,0 +1,19 @@
+{
+	"extension.displayName": "Ollama Dev (SSH Remote Provider)",
+	"extension.description": "Development provider for remote Ollama via SSH tunnel",
+
+	"command.connect.title": "Ollama: Connect to Remote",
+	"command.disconnect.title": "Ollama: Disconnect",
+	"command.reconnect.title": "Ollama: Reconnect",
+	"command.changeHost.title": "Ollama: Change Remote Host",
+	"command.toggleConnectionMode.title": "Ollama: Toggle Local / SSH",
+
+	"configuration.title": "Ollama Dev",
+	"configuration.connectionMode.description": "Connection mode for Ollama. Use 'ssh' for remote SSH tunnel or 'local' to connect directly to a local Ollama endpoint.",
+	"configuration.localEndpoint.description": "When connectionMode is 'local', the HTTP endpoint for Ollama (e.g., http://127.0.0.1:11434).",
+	"configuration.remoteHost.description": "SSH host for remote Ollama server (e.g., user@192.168.1.100)",
+	"configuration.remotePort.description": "Port where Ollama is running on the remote server.",
+	"configuration.localPort.description": "Local port to forward the SSH tunnel to (default 43134 to avoid conflicts with local Ollama).",
+	"configuration.sshKeyPath.description": "Path to SSH private key (e.g., ~/.ssh/id_ed25519). Leave empty to use the default SSH key.",
+	"configuration.inferenceParams.description": "Custom inference parameters for Ollama models."
+}
