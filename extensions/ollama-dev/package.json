@@ -1,7 +1,7 @@
 {
 	"name": "ollama-dev",
-	"displayName": "Ollama Dev (SSH Remote Provider)",
-	"description": "Development provider for remote Ollama via SSH tunnel",
+	"displayName": "%extension.displayName%",
+	"description": "%extension.description%",
 	"version": "0.0.1",
 	"publisher": "vscode",
 	"license": "MIT",
@@ -29,63 +29,63 @@
 		"commands": [
 			{
 				"command": "ollamaDev.connect",
-				"title": "Ollama: Connect to Remote"
+				"title": "%command.connect.title%"
 			},
 			{
 				"command": "ollamaDev.disconnect",
-				"title": "Ollama: Disconnect"
+				"title": "%command.disconnect.title%"
 			},
 			{
 				"command": "ollamaDev.reconnect",
-				"title": "Ollama: Reconnect"
+				"title": "%command.reconnect.title%"
 			},
 			{
 				"command": "ollamaDev.changeHost",
-				"title": "Ollama: Change Remote Host"
+				"title": "%command.changeHost.title%"
 			},
 			{
 				"command": "ollamaDev.toggleConnectionMode",
-				"title": "Ollama: Toggle Local / SSH"
+				"title": "%command.toggleConnectionMode.title%"
 			}
 		],
 		"configuration": {
-			"title": "Ollama Dev",
+			"title": "%configuration.title%",
 			"properties": {
 				"ollamaDev.connectionMode": {
 					"type": "string",
 					"enum": ["ssh", "local"],
 					"default": "ssh",
-					"description": "Connection mode for Ollama. Use 'ssh' for remote SSH tunnel or 'local' to connect directly to a local Ollama endpoint."
+					"description": "%configuration.connectionMode.description%"
 				},
 				"ollamaDev.localEndpoint": {
 					"type": "string",
 					"default": "http://127.0.0.1:11434",
-					"description": "When connectionMode is 'local', the HTTP endpoint for Ollama (e.g., http://127.0.0.1:11434)."
+					"description": "%configuration.localEndpoint.description%"
 				},
 				"ollamaDev.remoteHost": {
 					"type": "string",
 					"default": "",
-					"description": "SSH host for remote Ollama server (e.g., user@192.168.1.100)"
+					"description": "%configuration.remoteHost.description%"
 				},
 				"ollamaDev.remotePort": {
 					"type": "number",
 					"default": 11434,
-					"description": "Port where Ollama is running on the remote server"
+					"description": "%configuration.remotePort.description%"
 				},
 				"ollamaDev.localPort": {
 					"type": "number",
 					"default": 43134,
-					"description": "Local port to forward the SSH tunnel to (default 43134 to avoid conflicts with local Ollama)"
+					"description": "%configuration.localPort.description%"
 				},
 				"ollamaDev.sshKeyPath": {
 					"type": "string",
 					"default": "",
-					"description": "Path to SSH private key (e.g., ~/.ssh/agent). Leave empty to use default SSH key."
+					"description": "%configuration.sshKeyPath.description%"
 				},
 				"ollamaDev.inferenceParams": {
 					"type": "object",
 					"default": {},
-					"description": "Custom inference parameters for Ollama models"
+					"description": "%configuration.inferenceParams.description%"
 				}
 			}
 		}
