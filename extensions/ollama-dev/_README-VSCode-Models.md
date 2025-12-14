@@ -1,5 +1,20 @@
 # Model List Request
 
+> Maintenance notes for `ollama-dev`
+>
+> - Depends on proposed VS Code APIs: `chatProvider`, `languageModelThinkingPart`. Ensure these proposals stay enabled for `vscode.ollama-dev` (via launch flags or product allowlist) after VS Code updates; otherwise the provider will not register and models will be absent.
+> - Connection modes: `local` (direct HTTP to `ollamaDev.localEndpoint`, defaults to `http://127.0.0.1:11434`) and `ssh` (tunnel to `ollamaDev.remoteHost`). If models are missing, confirm the mode and endpoint, and check the “Ollama Dev” output for fetch logs.
+> - Rebuild instructions: run `npm install` in `extensions/ollama-dev` (uses repo TypeScript) then `node ../../node_modules/typescript/bin/tsc -p ./`. The built output is `extensions/ollama-dev/out/extension.js`.
+> - If VS Code API shapes change, update registration in `src/extension.ts` (look for `registerLanguageModelChatProvider`) and re-check advertised capabilities.
+
+## llama.cpp quick-add: GPT-OSS-20B-NEO-CODEPlus (IQ4_NL)
+
+- Model file: `GPT-OSS-20B-NEO-CODEPlus-IQ4_NL.gguf` (20B GPT-OSS, Neo CodePlus, IQ4_NL quant). Place it in the llama.cpp `models/` directory used by your server (the extension auto-detects any `.gguf` surfaced by `/v1/models`).
+- Download: use `huggingface-cli download <REPO_WITH_GGUF> GPT-OSS-20B-NEO-CODEPlus-IQ4_NL.gguf --local-dir models --local-dir-use-symlinks False`. Replace `<REPO_WITH_GGUF>` with the actual Hugging Face repo that hosts the IQ4_NL variant (e.g., the GGUF mirror). Avoid `--local-dir-use-symlinks True` on Windows because llama.cpp will not resolve them when served under WSL paths.
+- Start llama.cpp: `./server -m models/GPT-OSS-20B-NEO-CODEPlus-IQ4_NL.gguf -c 8192 -ngl 999 -p 8081` (adjust context/threads/port). The extension treats endpoints containing `8081` or `llama.cpp` as llama.cpp mode and will read `/v1/models`.
+- Extension settings: set `ollamaDev.connectionMode` = `local` and `ollamaDev.localEndpoint` = `http://127.0.0.1:8081`. Refresh model list from the “Ollama Dev” output channel; it should appear as `GPT-OSS-20B-NEO-CODEPlus-IQ4_NL.gguf (llama.cpp)` with tool-calling enabled.
+- Tool-call sanity check: run a simple chat with a tool to verify the recent explicit-name buffering fixes; ensure `tool_calls` in the streamed chunks carry `name` on the first fragment and remain attached after buffer flush.
+
 ## Metadata
 ~~~
 requestId        : d8f4d226-aa3b-44f7-a303-224015436c7b

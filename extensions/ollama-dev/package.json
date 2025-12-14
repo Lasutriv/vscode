@@ -42,11 +42,26 @@
 			{
 				"command": "ollamaDev.changeHost",
 				"title": "Ollama: Change Remote Host"
+			},
+			{
+				"command": "ollamaDev.toggleConnectionMode",
+				"title": "Ollama: Toggle Local / SSH"
 			}
 		],
 		"configuration": {
 			"title": "Ollama Dev",
 			"properties": {
+				"ollamaDev.connectionMode": {
+					"type": "string",
+					"enum": ["ssh", "local"],
+					"default": "ssh",
+					"description": "Connection mode for Ollama. Use 'ssh' for remote SSH tunnel or 'local' to connect directly to a local Ollama endpoint."
+				},
+				"ollamaDev.localEndpoint": {
+					"type": "string",
+					"default": "http://127.0.0.1:11434",
+					"description": "When connectionMode is 'local', the HTTP endpoint for Ollama (e.g., http://127.0.0.1:11434)."
+				},
 				"ollamaDev.remoteHost": {
 					"type": "string",
 					"default": "",

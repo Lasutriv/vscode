@@ -249,9 +249,6 @@ abstract class OpenChatGlobalAction extends Action2 {
 					const fileRange = hasKey(file, { range: true }) ? file.range : undefined;
 					uri = URI.isUri(file.uri) ? file.uri : URI.revive(file.uri as UriComponents);
 					range = fileRange as IRange | undefined;
-				} else if (hasKey(file, { scheme: true, path: true })) {
-					// Plain URI-like object from extension serialization
-					uri = URI.revive(file as unknown as UriComponents);
 				} else {
 					console.warn('[Chat attachFiles] Skipping invalid file entry:', file);
 					continue; // Skip invalid entries

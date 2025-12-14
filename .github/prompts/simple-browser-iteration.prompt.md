@@ -145,7 +145,7 @@ For features requiring Chrome DevTools Protocol:
 4. **Document in commit message:**
    ```
    feat(simple-browser): Add [feature name]
-   
+
    - What: Brief description
    - Why: Problem it solves
    - How: Technical approach
