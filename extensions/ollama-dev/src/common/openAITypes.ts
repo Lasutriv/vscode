@@ -21,6 +21,9 @@ export interface OpenAIChatRequest {
 	model: string;
 	messages: OpenAIChatMessage[];
 	stream: boolean;
+	stream_options?: {
+		include_usage?: boolean;
+	};
 	tools?: OllamaTool[];
 	temperature?: number;
 	max_tokens?: number;

@@ -1338,6 +1338,72 @@ have to be updated for changes to the rules above, or to support more deeply nes
 	width: fit-content;
 	height: fit-content;
 	border-radius: 100%;
+	pointer-events: none;
+}
+
+.interactive-session .chat-input-toolbars .chat-context-usage-indicator {
+	width: 14px;
+	height: 14px;
+	margin-left: 4px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	border-radius: 2px;
+}
+
+.interactive-session .chat-input-toolbars .chat-last-request-usage-indicator {
+	margin-left: 2px;
+}
+
+.interactive-session .chat-input-toolbars .chat-context-usage-indicator:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: 2px;
+}
+
+.interactive-session .chat-input-toolbars .chat-configure-tools-action-item {
+	display: flex;
+	align-items: center;
+}
+
+.interactive-session .chat-input-toolbars .chat-context-usage-indicator svg {
+	width: 14px;
+	height: 14px;
+}
+
+.interactive-session .chat-input-toolbars .chat-context-usage-indicator .chat-context-usage-track {
+	stroke: var(--vscode-disabledForeground);
+	pointer-events: none;
+	opacity: 0.35;
+}
+
+.interactive-session .chat-input-toolbars .chat-context-usage-indicator .chat-context-usage-progress {
+	stroke: var(--vscode-charts-blue);
+	pointer-events: none;
+}
+
+.interactive-session .chat-input-toolbars .chat-context-usage-indicator.level-ok .chat-context-usage-progress {
+	stroke: var(--vscode-charts-blue);
+}
+
+.interactive-session .chat-input-toolbars .chat-context-usage-indicator.level-caution .chat-context-usage-progress {
+	stroke: var(--vscode-charts-yellow);
+}
+
+.interactive-session .chat-input-toolbars .chat-context-usage-indicator.level-warning .chat-context-usage-progress {
+	stroke: var(--vscode-charts-orange);
+}
+
+.interactive-session .chat-input-toolbars .chat-context-usage-indicator.over-limit .chat-context-usage-progress {
+	stroke: var(--vscode-problemsErrorIcon-foreground);
+}
+
+.interactive-session .chat-input-toolbars .chat-context-usage-indicator.unavailable {
+	opacity: 0.6;
+}
+
+.interactive-session .chat-input-toolbars .chat-context-usage-indicator.unavailable .chat-context-usage-progress {
+	stroke: var(--vscode-disabledForeground);
 }
 
 .interactive-session .chat-input-toolbars > .chat-input-toolbar {

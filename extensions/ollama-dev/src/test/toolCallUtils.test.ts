@@ -7,7 +7,7 @@ import * as assert from 'assert';
 import { describe, it } from 'mocha';
 
 import type { ToolSchema } from '../backends/backendTypes';
-import { coerceToolArgsFromString, coerceToolArgsFromUnknown, ensureToolExplanationField, getToolNameToParams, inferToolNameFromRawArgs, normalizeToolInputSchema } from '../tools/toolCallUtils';
+import { coerceToolArgsFromString, coerceToolArgsFromUnknown, ensureToolExplanationField, getToolNameToParams, inferToolNameFromRawArgs, normalizeToolInputSchema, tryParseJsonObject } from '../tools/toolCallUtils';
 
 describe('ollama-dev toolCallUtils', () => {
 	it('normalizes tool schema and requires explanation when present', () => {
@@ -77,5 +77,16 @@ describe('ollama-dev toolCallUtils', () => {
 		const args: Record<string, unknown> = { explanation: 'keep', query: 'hello' };
 		ensureToolExplanationField(args, 'search');
 		assert.strictEqual(args.explanation, 'keep');
+	});
+
+	it('parses complete JSON object strings and rejects incomplete fragments', () => {
+		assert.deepStrictEqual(tryParseJsonObject('{"a":1,"b":"x"}'), { a: 1, b: 'x' });
+		assert.strictEqual(tryParseJsonObject('{"a":1'), undefined);
+		assert.strictEqual(tryParseJsonObject('not-json'), undefined);
+	});
+
+	it('handles braces inside strings when checking completeness', () => {
+		assert.strictEqual(tryParseJsonObject('{"a":"} in string"'), undefined);
+		assert.deepStrictEqual(tryParseJsonObject('{"a":"} in string"}'), { a: '} in string' });
 	});
 });

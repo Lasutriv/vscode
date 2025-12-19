@@ -840,6 +840,12 @@ configurationRegistry.registerConfiguration({
 				mode: 'auto'
 			}
 		},
+		'chat.debug.deriveUsageFromCopilotOutputChannel': {
+			type: 'boolean',
+			default: false,
+			description: nls.localize('chat.debug.deriveUsageFromCopilotOutputChannel', "When enabled, Chat may derive token usage for the last request by parsing the GitHub Copilot Chat Output channel logs. This is a best-effort debug fallback and may be inaccurate if multiple requests are running. Use with caution."),
+			tags: ['experimental'],
+		},
 		[ChatConfiguration.SubagentToolCustomAgents]: {
 			type: 'boolean',
 			description: nls.localize('chat.subagentTool.customAgents', "Whether the runSubagent tool is able to use custom agents. When enabled, the tool can take the name of a custom agent, but it must be given the exact name of the agent."),

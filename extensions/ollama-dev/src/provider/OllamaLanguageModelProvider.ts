@@ -170,7 +170,16 @@ export class OllamaLanguageModelProvider implements vscode.Disposable {
 	}
 
 	async provideTokenCount(_model: OllamaModelInfo, text: string | vscode.LanguageModelChatRequestMessage, _token: vscode.CancellationToken): Promise<number> {
-		// Rough estimate: ~4 chars per token
+		const endpoint = this.getEndpoint();
+		const isGguf = _model.ollamaName.endsWith('.gguf') || _model.id.includes('.gguf');
+		const llamaHint = endpoint.includes('8081') || endpoint.includes('llama.cpp') || this._apiMode === 'llamaCpp';
+
+		if (isGguf || llamaHint) {
+			this._apiMode = 'llamaCpp';
+			return this._llamaCppBackend.provideTokenCount(endpoint, _model, text);
+		}
+
+		// Fallback: rough estimate for Ollama and unknown backends (~4 chars per token).
 		if (typeof text === 'string') {
 			return Math.ceil(text.length / 4);
 		}
