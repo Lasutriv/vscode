@@ -10,7 +10,7 @@ import type { OllamaModelInfo, OllamaTool } from '../common/ollamaTypes';
 import type { OpenAIChatMessage, OpenAIChatRequest, OpenAIStreamChunk } from '../common/openAITypes';
 import { getLlamaCppAlternationViolation, normalizeOpenAIMessagesForAlternatingTemplate } from '../llamaCpp/alternation';
 import { SseDataJsonStreamParser } from '../streaming/streamParsers';
-import { coerceToolArgsFromString, ensureToolExplanationField, getToolNameToParams, inferToolNameFromRawArgs, normalizeToolInputSchema, type ToolInputSchema } from '../tools/toolCallUtils';
+import { coerceToolArgsFromString, ensureToolExplanationField, getToolNameToParams, inferToolNameFromRawArgs, normalizeToolInputSchema, tryParseJsonObject, type ToolInputSchema } from '../tools/toolCallUtils';
 import type { BackendPart, ToolSchema } from './backendTypes';
 
 export interface LlamaCppBackendListModelsResult {
@@ -19,7 +19,123 @@ export interface LlamaCppBackendListModelsResult {
 }
 
 export class LlamaCppBackend {
+	private _tokenizeStrategy: { path: string; body: (model: string, content: string) => string } | undefined;
+	private _tokenizeStrategyProbed = false;
+
 	constructor(private readonly _outputChannel: vscode.OutputChannel) { }
+
+	private extractTextForTokenCount(input: string | vscode.LanguageModelChatRequestMessage): string {
+		if (typeof input === 'string') {
+			return input;
+		}
+		let out = '';
+		for (const part of input.content) {
+			if (part instanceof vscode.LanguageModelTextPart) {
+				out += part.value;
+			} else if (part instanceof vscode.LanguageModelToolCallPart) {
+				// Preserve tool calls as a stable textual representation.
+				out += `\n<tool_call name="${part.name}" id="${part.callId}">${JSON.stringify(part.input ?? {})}</tool_call>`;
+			} else if (part instanceof vscode.LanguageModelToolResultPart) {
+				const content = part.content.map(c => c instanceof vscode.LanguageModelTextPart ? c.value : '').join('');
+				out += `\n<tool_result id="${part.callId}">${content}</tool_result>`;
+			}
+		}
+		return out;
+	}
+
+	private tryParseTokenCount(body: string): number | undefined {
+		try {
+			const parsed = JSON.parse(body) as unknown;
+			if (!parsed || typeof parsed !== 'object') {
+				return undefined;
+			}
+			const obj = parsed as Record<string, unknown>;
+			if (Array.isArray(obj.tokens)) {
+				return obj.tokens.length;
+			}
+			if (typeof obj.token_count === 'number') {
+				return obj.token_count;
+			}
+			if (typeof obj.count === 'number') {
+				return obj.count;
+			}
+			if (obj.data && typeof obj.data === 'object' && !Array.isArray(obj.data)) {
+				const data = obj.data as Record<string, unknown>;
+				if (Array.isArray(data.tokens)) {
+					return data.tokens.length;
+				}
+				if (typeof data.token_count === 'number') {
+					return data.token_count;
+				}
+			}
+		} catch {
+			// ignore
+		}
+		return undefined;
+	}
+
+	async provideTokenCount(endpoint: string, model: OllamaModelInfo, input: string | vscode.LanguageModelChatRequestMessage): Promise<number> {
+		const text = this.extractTextForTokenCount(input);
+		if (!text) {
+			return 0;
+		}
+
+		// Use cached strategy first.
+		if (this._tokenizeStrategy) {
+			try {
+				const response = await httpRequest(`${endpoint}${this._tokenizeStrategy.path}`, {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: this._tokenizeStrategy.body(model.ollamaName, text)
+				}, this._outputChannel);
+
+				if (response.status === 200) {
+					const count = this.tryParseTokenCount(response.body);
+					if (typeof count === 'number' && Number.isFinite(count) && count >= 0) {
+						return count;
+					}
+				}
+			} catch {
+				// fall through to probing/fallback
+			}
+		}
+
+		// Probe once per backend instance to avoid hammering endpoints.
+		if (!this._tokenizeStrategyProbed) {
+			this._tokenizeStrategyProbed = true;
+			const strategies: Array<{ path: string; body: (model: string, content: string) => string }> = [
+				{ path: '/tokenize', body: (_model, content) => JSON.stringify({ content }) },
+				{ path: '/tokenize', body: (_model, content) => JSON.stringify({ text: content }) },
+				{ path: '/v1/tokenize', body: (m, content) => JSON.stringify({ model: m, input: content }) },
+				{ path: '/v1/tokenize', body: (m, content) => JSON.stringify({ model: m, text: content }) },
+			];
+
+			for (const s of strategies) {
+				try {
+					const response = await httpRequest(`${endpoint}${s.path}`, {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: s.body(model.ollamaName, text)
+					}, this._outputChannel);
+
+					if (response.status !== 200) {
+						continue;
+					}
+					const count = this.tryParseTokenCount(response.body);
+					if (typeof count === 'number' && Number.isFinite(count) && count >= 0) {
+						this._tokenizeStrategy = s;
+						this._outputChannel.appendLine(`[ollama-dev] (llama.cpp) Using token counting endpoint ${s.path}`);
+						return count;
+					}
+				} catch {
+					// try next
+				}
+			}
+		}
+
+		// Final fallback: rough estimate.
+		return Math.ceil(text.length / 4);
+	}
 
 	async listModels(endpoint: string): Promise<LlamaCppBackendListModelsResult> {
 		this._outputChannel.appendLine(`[ollama-dev] Fetching models from ${endpoint}/v1/models (llama.cpp check)`);
@@ -37,8 +153,9 @@ export class LlamaCppBackend {
 		const first = Array.isArray(data.data) && data.data.length > 0 ? data.data[0] : undefined;
 		const firstAlt = Array.isArray(data.models) && data.models.length > 0 ? data.models[0] : undefined;
 
+		const ownedBy = first?.owned_by?.toLowerCase();
 		const isLlamaCpp =
-			!!(first && (first.owned_by === 'llamacpp' || (first.id && first.id.endsWith('.gguf')))) ||
+			!!(first && ((ownedBy === 'llamacpp' || ownedBy === 'llama.cpp' || ownedBy === 'llama_cpp') || (first.id && first.id.endsWith('.gguf')))) ||
 			!!(firstAlt && firstAlt.name && firstAlt.name.endsWith('.gguf'));
 
 		if (!isLlamaCpp) {
@@ -80,7 +197,7 @@ export class LlamaCppBackend {
 		token: vscode.CancellationToken
 	): Promise<void> {
 		const requestId = `req-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 7)}`;
-		const temperature = options.modelOptions?.temperature ?? 0.15;
+		const temperature = options.modelOptions?.temperature ?? 0;
 		const maxTokens = model.maxOutputTokens ?? 16384;
 		const toolCallIdToName = new Map<string, string>();
 
@@ -190,12 +307,14 @@ export class LlamaCppBackend {
 			model: model.ollamaName,
 			messages: normalizedOaMessages,
 			stream: true,
+			stream_options: { include_usage: true },
 			tools: oaTools,
 			temperature,
 			max_tokens: maxTokens
 		};
 
 		const pendingToolCalls = new Map<number, { id: string; name?: string; args: string[] }>();
+		const emittedToolCallIds = new Set<string>();
 
 		const toolIndexToId = new Map<number, string>();
 		const toolIdToIndex = new Map<string, number>();
@@ -237,6 +356,8 @@ export class LlamaCppBackend {
 		this._outputChannel.appendLine(`[ollama-dev] (llama.cpp) REQUEST ${requestId}`);
 		this._outputChannel.appendLine(`[ollama-dev] Endpoint: ${endpoint}/v1/chat/completions`);
 		this._outputChannel.appendLine(`[ollama-dev] Model: ${model.name}`);
+		this._outputChannel.appendLine(`[ollama-dev] Temperature: ${temperature}`);
+		this._outputChannel.appendLine(`[ollama-dev] Max tokens: ${maxTokens}`);
 		this._outputChannel.appendLine(`[ollama-dev] Messages: raw=${oaMessages.length}, final=${normalizedOaMessages.length}`);
 		this._outputChannel.appendLine(`[ollama-dev] Tools: ${oaTools?.length ?? 0}`);
 		const roleTrace = normalizedOaMessages.slice(0, 120).map((m, i) => {
@@ -323,7 +444,25 @@ export class LlamaCppBackend {
 									}
 
 									if (rawArgs) {
-										pending.args.push(rawArgs);
+										if (!emittedToolCallIds.has(pending.id)) {
+											pending.args.push(rawArgs);
+											const rawArgsStr = pending.args.join('');
+											const toolName = (pending.name?.trim() || toolIndexToExplicitName.get(idx) || toolIndexToName.get(idx))?.trim();
+											if (toolName) {
+												const parsedArgs = tryParseJsonObject(rawArgsStr);
+												if (parsedArgs) {
+													ensureToolExplanationField(parsedArgs, toolName);
+													onPart({ type: 'toolCall', callId: pending.id, name: toolName, input: parsedArgs });
+													emittedToolCallIds.add(pending.id);
+													pendingToolCalls.delete(idx);
+													this._outputChannel.appendLine(`[ollama-dev] (llama.cpp) -> tool_call[${idx}] ${toolName}(...) (early)`);
+													lastOpenToolIndex = undefined;
+												}
+											}
+										}
+										else {
+											this._outputChannel.appendLine(`[ollama-dev] (llama.cpp) Ignoring extra args for already-emitted tool call ${pending.id}`);
+										}
 									}
 								}
 							}

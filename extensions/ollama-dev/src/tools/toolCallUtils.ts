@@ -122,3 +122,68 @@ export function ensureToolExplanationField(argsObj: Record<string, unknown>, too
 	const argsPreview = Object.keys(argsObj).slice(0, 3).join(', ');
 	argsObj['explanation'] = `Calling ${toolName}${argsPreview ? ` with ${argsPreview}` : ''}`;
 }
+
+function isLikelyCompleteJsonObject(text: string): boolean {
+	const trimmed = text.trim();
+	if (trimmed.length < 2) {
+		return false;
+	}
+	if (trimmed[0] !== '{' || trimmed[trimmed.length - 1] !== '}') {
+		return false;
+	}
+
+	// Cheap structural check: verify braces are balanced while skipping JSON strings.
+	let depth = 0;
+	let inString = false;
+	let escaped = false;
+	for (let i = 0; i < trimmed.length; i++) {
+		const ch = trimmed[i];
+		if (inString) {
+			if (escaped) {
+				escaped = false;
+				continue;
+			}
+			if (ch === '\\') {
+				escaped = true;
+				continue;
+			}
+			if (ch === '"') {
+				inString = false;
+			}
+			continue;
+		}
+		if (ch === '"') {
+			inString = true;
+			continue;
+		}
+		if (ch === '{') {
+			depth++;
+		} else if (ch === '}') {
+			depth--;
+			if (depth < 0) {
+				return false;
+			}
+		}
+	}
+	return depth === 0 && !inString && !escaped;
+}
+
+/**
+ * Best-effort parsing for streamed JSON object fragments (common in tool-call argument streams).
+ *
+ * Returns `undefined` when the input is incomplete or doesn't parse to a plain object.
+ */
+export function tryParseJsonObject(text: string): Record<string, unknown> | undefined {
+	if (!isLikelyCompleteJsonObject(text)) {
+		return undefined;
+	}
+	try {
+		const parsed = JSON.parse(text);
+		if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+			return parsed as Record<string, unknown>;
+		}
+	} catch {
+		// ignore
+	}
+	return undefined;
+}

@@ -16,7 +16,7 @@ import { renderLabelWithIcons } from '../../../../base/browser/ui/iconLabel/icon
 import { IAction } from '../../../../base/common/actions.js';
 import { equals as arraysEqual } from '../../../../base/common/arrays.js';
 import { DeferredPromise, RunOnceScheduler } from '../../../../base/common/async.js';
-import { CancellationToken } from '../../../../base/common/cancellation.js';
+import { CancellationToken, CancellationTokenSource } from '../../../../base/common/cancellation.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { Iterable } from '../../../../base/common/iterator.js';
@@ -32,6 +32,7 @@ import { isEqual } from '../../../../base/common/resources.js';
 import { ScrollbarVisibility } from '../../../../base/common/scrollable.js';
 import { assertType } from '../../../../base/common/types.js';
 import { URI } from '../../../../base/common/uri.js';
+import { VSBuffer } from '../../../../base/common/buffer.js';
 import { IEditorConstructionOptions } from '../../../../editor/browser/config/editorConfiguration.js';
 import { EditorExtensionsRegistry } from '../../../../editor/browser/editorExtensions.js';
 import { CodeEditorWidget } from '../../../../editor/browser/widget/codeEditor/codeEditorWidget.js';
@@ -69,6 +70,7 @@ import { ISharedWebContentExtractorService } from '../../../../platform/webConte
 import { ResourceLabels } from '../../../browser/labels.js';
 import { IWorkbenchAssignmentService } from '../../../services/assignment/common/assignmentService.js';
 import { IChatEntitlementService } from '../../../services/chat/common/chatEntitlementService.js';
+import { IOutputChannelDescriptor, IOutputService, isMultiSourceOutputChannelDescriptor, isSingleSourceOutputChannelDescriptor } from '../../../services/output/common/output.js';
 import { ACTIVE_GROUP, IEditorService, SIDE_GROUP } from '../../../services/editor/common/editorService.js';
 import { AccessibilityVerbositySettingId } from '../../accessibility/browser/accessibilityConfiguration.js';
 import { AccessibilityCommandId } from '../../accessibility/common/accessibilityCommands.js';
@@ -78,10 +80,11 @@ import { IChatViewTitleActionContext } from '../common/chatActions.js';
 import { IChatAgentService } from '../common/chatAgents.js';
 import { ChatContextKeys } from '../common/chatContextKeys.js';
 import { IChatEditingSession, IModifiedFileEntry, ModifiedFileEntryState } from '../common/chatEditingService.js';
-import { IChatModelInputState, IChatRequestModeInfo, IInputModel } from '../common/chatModel.js';
+import { IChatModelInputState, IChatRequestModeInfo, IChatResponseModel, IInputModel } from '../common/chatModel.js';
 import { ChatMode, IChatMode, IChatModeService } from '../common/chatModes.js';
 import { IChatFollowup, IChatService } from '../common/chatService.js';
 import { IChatSessionProviderOptionItem, IChatSessionsService } from '../common/chatSessionsService.js';
+import { getPromptText } from '../common/chatParserTypes.js';
 import { ChatRequestVariableSet, IChatRequestVariableEntry, isElementVariableEntry, isImageVariableEntry, isNotebookOutputVariableEntry, isPasteVariableEntry, isPromptFileVariableEntry, isPromptTextVariableEntry, isSCMHistoryItemChangeRangeVariableEntry, isSCMHistoryItemChangeVariableEntry, isSCMHistoryItemVariableEntry, isStringVariableEntry } from '../common/chatVariableEntries.js';
 import { IChatResponseViewModel } from '../common/chatViewModel.js';
 import { ChatHistoryNavigator } from '../common/chatWidgetHistoryService.js';
@@ -299,6 +302,27 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 	private inputEditorHasText: IContextKey<boolean>;
 	private chatCursorAtTop: IContextKey<boolean>;
 	private inputEditorHasFocus: IContextKey<boolean>;
+	private inputContextTokens: IContextKey<number>;
+	private inputContextHistoryTokens: IContextKey<number>;
+	private inputContextAttachmentTokens: IContextKey<number>;
+	private inputContextModeTokens: IContextKey<number>;
+	private inputContextDraftTokens: IContextKey<number>;
+	private inputContextMaxTokens: IContextKey<number>;
+	private inputContextUsagePercent: IContextKey<number>;
+	private lastRequestUsageAvailable: IContextKey<boolean>;
+	private lastRequestPromptTokens: IContextKey<number>;
+	private lastRequestCompletionTokens: IContextKey<number>;
+	private lastRequestTotalTokens: IContextKey<number>;
+	private lastRequestCachedPromptTokens: IContextKey<number>;
+	private lastRequestAcceptedPredictionTokens: IContextKey<number>;
+	private lastRequestRejectedPredictionTokens: IContextKey<number>;
+	private lastRequestMaxPromptTokens: IContextKey<number>;
+	private lastRequestPromptUsagePercent: IContextKey<number>;
+	private readonly _recomputeInputContextUsageScheduler: RunOnceScheduler;
+	private _recomputeInputContextUsageCts: CancellationTokenSource | undefined;
+	private _recomputeInputContextUsageRunCounter = 0;
+	private readonly _contextUsageDisposables = this._register(new DisposableStore());
+	private readonly _recomputeLastRequestUsageScheduler: RunOnceScheduler;
 	private currentlyEditingInputKey!: IContextKey<boolean>;
 	private chatModeKindKey: IContextKey<ChatModeKind>;
 	private withinEditSessionKey: IContextKey<boolean>;
@@ -386,6 +410,9 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 	}
 
 	private _attemptedWorkingSetEntriesCount: number = 0;
+	private _lastRequestUsageDebugLoggedResponseId: string | undefined;
+	private _recomputeLastRequestUsageRunCounter = 0;
+	private _recomputeLastRequestUsageCts: CancellationTokenSource | undefined;
 	/**
 	 * The number of working set entries that the user actually wanted to attach.
 	 * This is less than or equal to {@link ChatInputPart.chatEditWorkingSetFiles}.
@@ -428,11 +455,24 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 		@IChatService private readonly chatService: IChatService,
 		@IChatSessionsService private readonly chatSessionsService: IChatSessionsService,
 		@IChatContextService private readonly chatContextService: IChatContextService,
+		@IOutputService private readonly outputService: IOutputService,
 	) {
 		super();
 
 		// Initialize debounced text sync scheduler
 		this._syncTextDebounced = this._register(new RunOnceScheduler(() => this._syncInputStateToModel(), 150));
+		this._recomputeInputContextUsageScheduler = this._register(new RunOnceScheduler(() => void this._recomputeInputContextUsage(), 200));
+		this._recomputeLastRequestUsageScheduler = this._register(new RunOnceScheduler(() => this._recomputeLastRequestUsage(), 200));
+		this._register(toDisposable(() => {
+			this._recomputeInputContextUsageCts?.cancel();
+			this._recomputeInputContextUsageCts?.dispose();
+			this._recomputeInputContextUsageCts = undefined;
+		}));
+		this._register(toDisposable(() => {
+			this._recomputeLastRequestUsageCts?.cancel();
+			this._recomputeLastRequestUsageCts?.dispose();
+			this._recomputeLastRequestUsageCts = undefined;
+		}));
 
 		this._contextResourceLabels = this._register(this.instantiationService.createInstance(ResourceLabels, { onDidChangeVisibility: this._onDidChangeVisibility.event }));
 		this._currentModeObservable = observableValue<IChatMode>('currentMode', this.options.defaultMode ?? ChatMode.Agent);
@@ -451,6 +491,22 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 		this.inputEditorHasText = ChatContextKeys.inputHasText.bindTo(contextKeyService);
 		this.chatCursorAtTop = ChatContextKeys.inputCursorAtTop.bindTo(contextKeyService);
 		this.inputEditorHasFocus = ChatContextKeys.inputHasFocus.bindTo(contextKeyService);
+		this.inputContextTokens = ChatContextKeys.inputContextTokens.bindTo(contextKeyService);
+		this.inputContextHistoryTokens = ChatContextKeys.inputContextHistoryTokens.bindTo(contextKeyService);
+		this.inputContextAttachmentTokens = ChatContextKeys.inputContextAttachmentTokens.bindTo(contextKeyService);
+		this.inputContextModeTokens = ChatContextKeys.inputContextModeTokens.bindTo(contextKeyService);
+		this.inputContextDraftTokens = ChatContextKeys.inputContextDraftTokens.bindTo(contextKeyService);
+		this.inputContextMaxTokens = ChatContextKeys.inputContextMaxTokens.bindTo(contextKeyService);
+		this.inputContextUsagePercent = ChatContextKeys.inputContextUsagePercent.bindTo(contextKeyService);
+		this.lastRequestUsageAvailable = ChatContextKeys.lastRequestUsageAvailable.bindTo(contextKeyService);
+		this.lastRequestPromptTokens = ChatContextKeys.lastRequestPromptTokens.bindTo(contextKeyService);
+		this.lastRequestCompletionTokens = ChatContextKeys.lastRequestCompletionTokens.bindTo(contextKeyService);
+		this.lastRequestTotalTokens = ChatContextKeys.lastRequestTotalTokens.bindTo(contextKeyService);
+		this.lastRequestCachedPromptTokens = ChatContextKeys.lastRequestCachedPromptTokens.bindTo(contextKeyService);
+		this.lastRequestAcceptedPredictionTokens = ChatContextKeys.lastRequestAcceptedPredictionTokens.bindTo(contextKeyService);
+		this.lastRequestRejectedPredictionTokens = ChatContextKeys.lastRequestRejectedPredictionTokens.bindTo(contextKeyService);
+		this.lastRequestMaxPromptTokens = ChatContextKeys.lastRequestMaxPromptTokens.bindTo(contextKeyService);
+		this.lastRequestPromptUsagePercent = ChatContextKeys.lastRequestPromptUsagePercent.bindTo(contextKeyService);
 		this.chatModeKindKey = ChatContextKeys.chatModeKind.bindTo(contextKeyService);
 		this.withinEditSessionKey = ChatContextKeys.withinEditSessionDiff.bindTo(contextKeyService);
 		this.filePartOfEditSessionKey = ChatContextKeys.filePartOfEditSession.bindTo(contextKeyService);
@@ -529,6 +585,7 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 				this.accessibilityService.alert(this._currentLanguageModel.metadata.name);
 			}
 			this._inputEditor?.updateOptions({ ariaLabel: this._getAriaLabel() });
+			this._scheduleRecomputeInputContextUsage();
 		}));
 		this._register(this.chatModeService.onDidChangeChatModes(() => this.validateCurrentChatMode()));
 		this._register(autorun(r => {
@@ -1318,6 +1375,17 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 	render(container: HTMLElement, initialValue: string, widget: IChatWidget) {
 		this._widget = widget;
 
+		this._register(widget.onDidChangeViewModel(() => {
+			this._updateContextUsageModelListeners();
+			this._scheduleRecomputeInputContextUsage();
+			this._scheduleRecomputeLastRequestUsage();
+		}));
+		this._register(widget.onDidAcceptInput(() => {
+			this._scheduleRecomputeInputContextUsage();
+			this._scheduleRecomputeLastRequestUsage();
+		}));
+		this._updateContextUsageModelListeners();
+
 		let elements;
 		if (this.options.renderStyle === 'compact') {
 			elements = dom.h('.interactive-input-part', [
@@ -1400,6 +1468,7 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 				this._indexOfLastAttachedContextDeletedWithKeyboard = -1;
 			}
 			this._handleAttachedContextChange();
+			this._scheduleRecomputeInputContextUsage();
 		}));
 
 		this.renderChatEditingSessionState(null);
@@ -1491,6 +1560,7 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 
 			// Debounced sync to model for text changes
 			this._syncTextDebounced.schedule();
+			this._scheduleRecomputeInputContextUsage();
 		}));
 		this._register(this._inputEditor.onDidContentSizeChange(e => {
 			if (e.contentHeightChanged) {
@@ -1627,6 +1697,7 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 			const lineNumber = this.inputModel.getLineCount();
 			this._inputEditor.setPosition({ lineNumber, column: this.inputModel.getLineMaxColumn(lineNumber) });
 		}
+		this._scheduleRecomputeInputContextUsage();
 
 		const onDidChangeCursorPosition = () => {
 			const model = this._inputEditor.getModel();
@@ -2217,6 +2288,874 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 			this.followupsDisposables.add(this.instantiationService.createInstance<typeof ChatFollowups<IChatFollowup>, ChatFollowups<IChatFollowup>>(ChatFollowups, this.followupsContainer, items, this.location, undefined, followup => this._onDidAcceptFollowup.fire({ followup, response })));
 		}
 		this._onDidChangeHeight.fire();
+	}
+
+	private _scheduleRecomputeInputContextUsage(): void {
+		this._recomputeInputContextUsageScheduler.schedule();
+	}
+
+	private _scheduleRecomputeLastRequestUsage(): void {
+		this._recomputeLastRequestUsageScheduler.schedule();
+	}
+
+	private _updateContextUsageModelListeners(): void {
+		this._contextUsageDisposables.clear();
+
+		const chatModel = this._widget?.viewModel?.model;
+		if (!chatModel) {
+			return;
+		}
+
+		this._contextUsageDisposables.add(chatModel.onDidChange(() => this._scheduleRecomputeInputContextUsage()));
+		this._contextUsageDisposables.add(chatModel.onDidChange(() => this._scheduleRecomputeLastRequestUsage()));
+		this._contextUsageDisposables.add(chatModel.onDidDispose(() => this._scheduleRecomputeInputContextUsage()));
+		this._contextUsageDisposables.add(chatModel.onDidDispose(() => this._scheduleRecomputeLastRequestUsage()));
+	}
+
+	private _clearLastRequestUsage(): void {
+		this.lastRequestUsageAvailable.set(false);
+		this.lastRequestPromptTokens.set(0);
+		this.lastRequestCompletionTokens.set(0);
+		this.lastRequestTotalTokens.set(0);
+		this.lastRequestCachedPromptTokens.set(0);
+		this.lastRequestAcceptedPredictionTokens.set(0);
+		this.lastRequestRejectedPredictionTokens.set(0);
+		this.lastRequestMaxPromptTokens.set(0);
+		this.lastRequestPromptUsagePercent.set(0);
+	}
+
+	private _readNumber(obj: unknown, ...path: string[]): number | undefined {
+		let cur: unknown = obj;
+		for (const key of path) {
+			if (!cur || typeof cur !== 'object') {
+				return undefined;
+			}
+			const record = cur as Record<string, unknown>;
+			if (!Object.prototype.hasOwnProperty.call(record, key)) {
+				return undefined;
+			}
+			cur = record[key];
+		}
+		const n = Number(cur);
+		return Number.isFinite(n) ? n : undefined;
+	}
+
+	private _isDeriveUsageFromCopilotOutputEnabled(): boolean {
+		return this.configurationService.getValue<boolean>('chat.debug.deriveUsageFromCopilotOutputChannel') === true;
+	}
+
+	private _isCopilotProvidedModel(): boolean {
+		// Language model identifiers in VS Code typically look like `copilot/<modelId>`.
+		// Vendor values can differ between providers/bridges, so prefer the identifier prefix.
+		const id = this._currentLanguageModel?.identifier;
+		if (typeof id === 'string' && id.startsWith('copilot/')) {
+			return true;
+		}
+		const vendor = this._currentLanguageModel?.metadata.vendor;
+		return vendor === 'copilot';
+	}
+
+	private _getCopilotOutputChannelDescriptor(): IOutputChannelDescriptor | undefined {
+		// Prefer matching by extension id, then by label.
+		const descriptors = this.outputService.getChannelDescriptors();
+		return descriptors.find(d => d.extensionId === 'github.copilot-chat')
+			?? descriptors.find(d => d.extensionId === 'github.copilot')
+			?? descriptors.find(d => d.extensionId?.startsWith('github.copilot'))
+			?? descriptors.find(d => d.label === 'GitHub Copilot Chat')
+			?? descriptors.find(d => {
+				const label = d.label?.toLowerCase();
+				return typeof label === 'string' && label.includes('copilot') && label.includes('chat');
+			});
+	}
+
+	private _getOutputChannelResources(descriptor: IOutputChannelDescriptor): URI[] {
+		if (isSingleSourceOutputChannelDescriptor(descriptor)) {
+			return [descriptor.source.resource];
+		}
+		if (isMultiSourceOutputChannelDescriptor(descriptor)) {
+			return descriptor.source.map(s => s.resource);
+		}
+
+		// Some channels (notably delegated log channels) don't surface their backing file via the descriptor.
+		// Try to resolve the runtime channel model source (best-effort).
+		const channel = this.outputService.getChannel(descriptor.id) as unknown as { model?: { source?: unknown } } | undefined;
+		const source = channel?.model?.source;
+		if (source) {
+			if (Array.isArray(source)) {
+				return source.map(s => (s as { resource?: URI }).resource).filter((r): r is URI => URI.isUri(r));
+			}
+			const resource = (source as { resource?: URI }).resource;
+			if (URI.isUri(resource)) {
+				return [resource];
+			}
+		}
+
+		return [];
+	}
+
+	private async _readFileTail(resource: URI, maxBytes: number, token: CancellationToken): Promise<string | undefined> {
+		try {
+			const stat = await this.fileService.stat(resource);
+			if (token.isCancellationRequested) {
+				return undefined;
+			}
+			const size = stat.size ?? 0;
+			const position = Math.max(0, size - maxBytes);
+			const data = await this.fileService.readFile(resource, { position });
+			if (token.isCancellationRequested) {
+				return undefined;
+			}
+			return data.value.toString();
+		} catch {
+			return undefined;
+		}
+	}
+
+	private _tryParseJsonObjectFromLogLine(line: string): unknown | undefined {
+		const start = line.indexOf('{');
+		const end = line.lastIndexOf('}');
+		if (start < 0 || end <= start) {
+			return undefined;
+		}
+		const maybeJson = line.slice(start, end + 1);
+		try {
+			return JSON.parse(maybeJson);
+		} catch {
+			return undefined;
+		}
+	}
+
+	private _tryExtractUsageFromTextNearCompletedEvent(text: string): unknown | undefined {
+		// Cope with huge JSON records that may be truncated at the read tail boundary.
+		// We locate the last `response.completed` marker and then extract the nearest `"usage": { ... }` object.
+		const typeNeedle = '"type"';
+		const completedNeedle = 'response.completed';
+		let lastTypeIndex = -1;
+		// Quick-and-cheap: locate the last occurrence of the event name first.
+		const lastCompletedIndex = text.lastIndexOf(completedNeedle);
+		if (lastCompletedIndex < 0) {
+			return undefined;
+		}
+		// Ensure we're looking at something that resembles a type field.
+		lastTypeIndex = text.lastIndexOf(typeNeedle, lastCompletedIndex);
+		if (lastTypeIndex < 0) {
+			lastTypeIndex = lastCompletedIndex;
+		}
+
+		// Search a bounded window before the type marker for a usage field.
+		const lookback = 200_000;
+		const windowStart = Math.max(0, lastTypeIndex - lookback);
+		const window = text.slice(windowStart, lastTypeIndex + 10_000);
+
+		const usageRegex = /"usage"\s*:\s*\{/g;
+		let match: RegExpExecArray | null;
+		let lastUsageMatch: RegExpExecArray | null = null;
+		while ((match = usageRegex.exec(window))) {
+			lastUsageMatch = match;
+		}
+		if (!lastUsageMatch) {
+			return undefined;
+		}
+
+		const braceStartInWindow = window.indexOf('{', lastUsageMatch.index);
+		if (braceStartInWindow < 0) {
+			return undefined;
+		}
+		const braceStart = braceStartInWindow;
+
+		// Extract a balanced JSON object starting at the opening brace.
+		let depth = 0;
+		let inString = false;
+		let escaped = false;
+		for (let i = braceStart; i < window.length; i++) {
+			const ch = window.charCodeAt(i);
+			if (inString) {
+				if (escaped) {
+					escaped = false;
+					continue;
+				}
+				if (ch === 92 /* \\ */) {
+					escaped = true;
+					continue;
+				}
+				if (ch === 34 /* \" */) {
+					inString = false;
+				}
+				continue;
+			}
+			if (ch === 34 /* \" */) {
+				inString = true;
+				continue;
+			}
+			if (ch === 123 /* { */) {
+				depth++;
+				continue;
+			}
+			if (ch === 125 /* } */) {
+				depth--;
+				if (depth === 0) {
+					const objText = window.slice(braceStart, i + 1);
+					try {
+						return JSON.parse(objText);
+					} catch {
+						return undefined;
+					}
+				}
+			}
+		}
+
+		return undefined;
+	}
+
+	private async _tryDeriveUsageFromCopilotOutputChannel(token: CancellationToken): Promise<unknown | undefined> {
+		// This is an opt-in, best-effort fallback for when providers don't attach usage to ChatResult.metadata.
+		// IMPORTANT: We do not log any line content; we only parse structured JSON to extract numeric usage.
+		if (!this._isDeriveUsageFromCopilotOutputEnabled()) {
+			return undefined;
+		}
+
+		if (!this._isCopilotProvidedModel()) {
+			this._traceLastRequestUsage('fallback-derive-from-output-skip-non-copilot-model', {
+				modelId: this._currentLanguageModel?.identifier ?? 'unknown',
+				vendor: this._currentLanguageModel?.metadata.vendor ?? 'unknown',
+			});
+			return undefined;
+		}
+
+		const descriptor = this._getCopilotOutputChannelDescriptor();
+		if (!descriptor) {
+			this._traceLastRequestUsage('fallback-derive-from-output-no-descriptor', {});
+			return undefined;
+		}
+
+		const resources = this._getOutputChannelResources(descriptor);
+		if (!resources.length) {
+			this._traceLastRequestUsage('fallback-derive-from-output-no-resources', {
+				descriptorId: descriptor.id,
+				descriptorLabel: descriptor.label,
+			});
+			return undefined;
+		}
+
+		const inspected: Array<{ scheme: string; length: number; hasCompleted: boolean; hasUsage: boolean }> = [];
+
+		// Read tail of the newest-looking resource (if multiple, try them all from last to first).
+		for (let i = resources.length - 1; i >= 0; i--) {
+			const resource = resources[i];
+			const content = await this._readFileTail(resource, 1024 * 1024, token);
+			if (!content || token.isCancellationRequested) {
+				continue;
+			}
+			inspected.push({
+				scheme: resource.scheme,
+				length: content.length,
+				hasCompleted: content.indexOf('response.completed') !== -1,
+				hasUsage: content.indexOf('"usage"') !== -1,
+			});
+
+			// Prefer extracting the usage object directly (more robust against large/truncated records).
+			const extracted = this._tryExtractUsageFromTextNearCompletedEvent(content);
+			if (this._looksLikeUsage(extracted)) {
+				this._traceLastRequestUsage('fallback-derive-from-output-extract-hit', {
+					descriptorId: descriptor.id,
+					resourceScheme: resource.scheme,
+				});
+				return extracted;
+			}
+
+			const lines = content.split(/\r?\n/);
+			for (let j = lines.length - 1; j >= 0; j--) {
+				const line = lines[j];
+				if (!line || line.indexOf('"usage"') === -1) {
+					continue;
+				}
+				const obj = this._tryParseJsonObjectFromLogLine(line);
+				if (!obj || typeof obj !== 'object') {
+					continue;
+				}
+
+				const record = obj as Record<string, unknown>;
+				// Prefer the final event in the stream.
+				if (record['type'] !== 'response.completed') {
+					continue;
+				}
+
+				const usage = record['usage'];
+				if (this._looksLikeUsage(usage)) {
+					this._traceLastRequestUsage('fallback-derive-from-output-line-hit', {
+						descriptorId: descriptor.id,
+						resourceScheme: resource.scheme,
+					});
+					return usage;
+				}
+			}
+		}
+
+		this._traceLastRequestUsage('fallback-derive-from-output-miss-details', {
+			descriptorId: descriptor.id,
+			descriptorLabel: descriptor.label,
+			resources: inspected,
+		});
+		return undefined;
+	}
+
+	private _safeObjectKeys(obj: unknown, max: number = 20): string[] {
+		if (!obj || typeof obj !== 'object') {
+			return [];
+		}
+		try {
+			return Object.keys(obj as Record<string, unknown>).slice(0, max);
+		} catch {
+			return [];
+		}
+	}
+
+	private _traceLastRequestUsage(reason: string, details: Record<string, unknown>): void {
+		// Trace-level only and privacy-safe: only log ids/keys/types/numbers. Never log prompt or response text.
+		try {
+			const safe = JSON.stringify(details);
+			this.logService.trace(`[chat][usage] ${reason}: ${safe}`);
+		} catch {
+			this.logService.trace(`[chat][usage] ${reason}`);
+		}
+	}
+
+	private _looksLikeUsage(obj: unknown): boolean {
+		if (!obj || typeof obj !== 'object') {
+			return false;
+		}
+		return this._readNumber(obj, 'prompt_tokens') !== undefined
+			|| this._readNumber(obj, 'promptTokens') !== undefined
+			|| this._readNumber(obj, 'input_tokens') !== undefined
+			|| this._readNumber(obj, 'inputTokens') !== undefined
+			|| this._readNumber(obj, 'completion_tokens') !== undefined
+			|| this._readNumber(obj, 'completionTokens') !== undefined
+			|| this._readNumber(obj, 'output_tokens') !== undefined
+			|| this._readNumber(obj, 'outputTokens') !== undefined
+			|| this._readNumber(obj, 'total_tokens') !== undefined
+			|| this._readNumber(obj, 'totalTokens') !== undefined;
+	}
+
+	private _findUsageInUnknown(obj: unknown, maxDepth: number = 4, visited?: WeakSet<object>): unknown | undefined {
+		if (!obj || maxDepth < 0) {
+			return undefined;
+		}
+
+		if (this._looksLikeUsage(obj)) {
+			return obj;
+		}
+
+		if (Array.isArray(obj)) {
+			// Only scan the tail to prefer "final" objects like response.completed.
+			const start = Math.max(0, obj.length - 25);
+			for (let i = obj.length - 1; i >= start; i--) {
+				const found = this._findUsageInUnknown(obj[i], maxDepth - 1, visited);
+				if (found) {
+					return found;
+				}
+			}
+			return undefined;
+		}
+
+		if (typeof obj !== 'object') {
+			return undefined;
+		}
+
+		visited ??= new WeakSet<object>();
+		if (visited.has(obj as object)) {
+			return undefined;
+		}
+		visited.add(obj as object);
+
+		const record = obj as Record<string, unknown>;
+
+		// Common direct key.
+		const direct = record['usage'] ?? record['token_usage'] ?? record['tokenUsage'];
+		if (direct && this._looksLikeUsage(direct)) {
+			return direct;
+		}
+
+		// Shallow scan a bounded number of keys.
+		const keys = Object.keys(record);
+		const maxKeys = 30;
+		for (let i = Math.max(0, keys.length - maxKeys); i < keys.length; i++) {
+			const key = keys[i];
+			const value = record[key];
+			if (typeof value === 'string') {
+				continue;
+			}
+			const found = this._findUsageInUnknown(value, maxDepth - 1, visited);
+			if (found) {
+				return found;
+			}
+		}
+
+		return undefined;
+	}
+
+	private _getUsageFromThinkingParts(response: IChatResponseModel | undefined): unknown | undefined {
+		const parts = response?.entireResponse.value;
+		if (!parts) {
+			return undefined;
+		}
+
+		for (let i = parts.length - 1; i >= 0; i--) {
+			const part = parts[i];
+			if (part.kind !== 'thinking') {
+				continue;
+			}
+
+			const metadata = (part as { metadata?: unknown }).metadata;
+			if (!metadata || typeof metadata !== 'object') {
+				continue;
+			}
+
+			const found = this._findUsageInUnknown(metadata);
+			if (found) {
+				return found;
+			}
+		}
+
+		return undefined;
+	}
+
+	private _recomputeLastRequestUsage(): void {
+		const chatModel = this._widget?.viewModel?.model;
+		if (!chatModel) {
+			this._clearLastRequestUsage();
+			return;
+		}
+
+		// Cancel any in-flight fallback derivation.
+		this._recomputeLastRequestUsageCts?.cancel();
+		this._recomputeLastRequestUsageCts?.dispose();
+		this._recomputeLastRequestUsageCts = new CancellationTokenSource();
+		const fallbackToken = this._recomputeLastRequestUsageCts.token;
+		const runId = ++this._recomputeLastRequestUsageRunCounter;
+
+		const requests = chatModel.getRequests();
+		let debugLogged = 0;
+		for (let i = requests.length - 1; i >= 0; i--) {
+			const request = requests[i];
+			const response = request.response;
+			if (!response || !response.isComplete) {
+				continue;
+			}
+
+			// Debug info (trace-level): log only for the most recent few completed responses, and at most once per response id.
+			const responseId = (response as unknown as { id?: string }).id;
+			const shouldMaybeLog = debugLogged < 3 && (!!responseId && this._lastRequestUsageDebugLoggedResponseId !== responseId);
+
+			const result = response.result as unknown;
+			const resultObj = result && typeof result === 'object' ? result as Record<string, unknown> : undefined;
+			const metadata = resultObj?.metadata;
+			let usage: unknown | undefined;
+			const usageCandidates: unknown[] = [];
+			if (metadata && typeof metadata === 'object') {
+				usageCandidates.push((metadata as Record<string, unknown>)['usage'] ?? metadata);
+			}
+			if (resultObj) {
+				usageCandidates.push(resultObj['usage']);
+				usageCandidates.push(resultObj);
+			}
+
+			for (const candidate of usageCandidates) {
+				usage = this._findUsageInUnknown(candidate);
+				if (usage) {
+					break;
+				}
+			}
+
+			usage ??= this._getUsageFromThinkingParts(response);
+
+			if (!usage || typeof usage !== 'object') {
+				if (shouldMaybeLog) {
+					const parts = response.entireResponse.value as Array<{ kind?: string; metadata?: unknown }> | undefined;
+					const thinkingParts = parts?.filter(p => p?.kind === 'thinking') ?? [];
+					const thinkingWithMetadata = thinkingParts.filter(p => !!p && typeof p.metadata === 'object' && p.metadata !== null);
+
+					this._traceLastRequestUsage('no-usage-found', {
+						requestId: request.id,
+						responseId: responseId ?? 'unknown',
+						agentId: response.agent?.id,
+						resultType: typeof result,
+						resultKeys: this._safeObjectKeys(resultObj),
+						metadataType: typeof metadata,
+						metadataKeys: this._safeObjectKeys(metadata),
+						thinkingParts: thinkingParts.length,
+						thinkingWithMetadata: thinkingWithMetadata.length,
+						thinkingMetadataKeysSample: thinkingWithMetadata.length ? this._safeObjectKeys(thinkingWithMetadata[thinkingWithMetadata.length - 1].metadata) : [],
+					});
+					debugLogged++;
+					if (responseId) {
+						this._lastRequestUsageDebugLoggedResponseId = responseId;
+					}
+				}
+				continue;
+			}
+
+			const promptTokens =
+				this._readNumber(usage, 'prompt_tokens')
+				?? this._readNumber(usage, 'promptTokens')
+				?? this._readNumber(usage, 'input_tokens')
+				?? this._readNumber(usage, 'inputTokens')
+				?? 0;
+			const completionTokens =
+				this._readNumber(usage, 'completion_tokens')
+				?? this._readNumber(usage, 'completionTokens')
+				?? this._readNumber(usage, 'output_tokens')
+				?? this._readNumber(usage, 'outputTokens')
+				?? 0;
+			const totalTokens = this._readNumber(usage, 'total_tokens') ?? this._readNumber(usage, 'totalTokens') ?? (promptTokens + completionTokens);
+			const cachedTokens = this._readNumber(usage, 'prompt_tokens_details', 'cached_tokens')
+				?? this._readNumber(usage, 'promptTokensDetails', 'cachedTokens')
+				?? this._readNumber(usage, 'input_tokens_details', 'cached_tokens')
+				?? this._readNumber(usage, 'inputTokensDetails', 'cachedTokens')
+				?? 0;
+			const acceptedPredictionTokens = this._readNumber(usage, 'completion_tokens_details', 'accepted_prediction_tokens')
+				?? this._readNumber(usage, 'completionTokensDetails', 'acceptedPredictionTokens')
+				?? 0;
+			const rejectedPredictionTokens = this._readNumber(usage, 'completion_tokens_details', 'rejected_prediction_tokens')
+				?? this._readNumber(usage, 'completionTokensDetails', 'rejectedPredictionTokens')
+				?? 0;
+
+			const maxPromptTokens =
+				(this._readNumber(metadata, 'maxPromptTokens') ?? this._readNumber(metadata, 'max_prompt_tokens'))
+				?? this._readNumber(resultObj, 'maxPromptTokens')
+				?? this._readNumber(resultObj, 'max_prompt_tokens')
+				?? this._readNumber(usage, 'maxPromptTokens')
+				?? this._readNumber(usage, 'max_prompt_tokens')
+				?? this._currentLanguageModel?.metadata.maxInputTokens
+				?? 0;
+
+			this.lastRequestUsageAvailable.set(true);
+			this.lastRequestPromptTokens.set(promptTokens);
+			this.lastRequestCompletionTokens.set(completionTokens);
+			this.lastRequestTotalTokens.set(totalTokens);
+			this.lastRequestCachedPromptTokens.set(cachedTokens);
+			this.lastRequestAcceptedPredictionTokens.set(acceptedPredictionTokens);
+			this.lastRequestRejectedPredictionTokens.set(rejectedPredictionTokens);
+			this.lastRequestMaxPromptTokens.set(maxPromptTokens);
+			this.lastRequestPromptUsagePercent.set(maxPromptTokens > 0 ? Math.max(0, Math.min(1, promptTokens / maxPromptTokens)) : 0);
+
+			if (shouldMaybeLog) {
+				this._traceLastRequestUsage('usage-found', {
+					requestId: request.id,
+					responseId: responseId ?? 'unknown',
+					agentId: response.agent?.id,
+					usageKeys: this._safeObjectKeys(usage),
+					promptTokens,
+					completionTokens,
+					totalTokens,
+					cachedTokens,
+					acceptedPredictionTokens,
+					rejectedPredictionTokens,
+					maxPromptTokens,
+				});
+				debugLogged++;
+				if (responseId) {
+					this._lastRequestUsageDebugLoggedResponseId = responseId;
+				}
+			}
+			return;
+		}
+
+		this._clearLastRequestUsage();
+
+		// Best-effort fallback for Copilot: derive usage from the Copilot output channel (opt-in).
+		// Only attempt when we have at least one complete response in this chat model.
+		const hasAnyCompleteResponse = requests.some(r => !!r.response?.isComplete);
+		if (hasAnyCompleteResponse && this._isDeriveUsageFromCopilotOutputEnabled()) {
+			this._traceLastRequestUsage('fallback-derive-from-output-start', { runId });
+			void (async () => {
+				const derived = await this._tryDeriveUsageFromCopilotOutputChannel(fallbackToken);
+				if (fallbackToken.isCancellationRequested || runId !== this._recomputeLastRequestUsageRunCounter) {
+					return;
+				}
+				if (!derived || typeof derived !== 'object') {
+					this._traceLastRequestUsage('fallback-derive-from-output-miss', { runId });
+					return;
+				}
+
+				const promptTokens =
+					this._readNumber(derived, 'prompt_tokens')
+					?? this._readNumber(derived, 'promptTokens')
+					?? this._readNumber(derived, 'input_tokens')
+					?? this._readNumber(derived, 'inputTokens')
+					?? 0;
+				const completionTokens =
+					this._readNumber(derived, 'completion_tokens')
+					?? this._readNumber(derived, 'completionTokens')
+					?? this._readNumber(derived, 'output_tokens')
+					?? this._readNumber(derived, 'outputTokens')
+					?? 0;
+				const totalTokens = this._readNumber(derived, 'total_tokens') ?? this._readNumber(derived, 'totalTokens') ?? (promptTokens + completionTokens);
+				const cachedTokens = this._readNumber(derived, 'prompt_tokens_details', 'cached_tokens')
+					?? this._readNumber(derived, 'promptTokensDetails', 'cachedTokens')
+					?? this._readNumber(derived, 'input_tokens_details', 'cached_tokens')
+					?? this._readNumber(derived, 'inputTokensDetails', 'cachedTokens')
+					?? 0;
+
+				const maxPromptTokens = this._currentLanguageModel?.metadata.maxInputTokens ?? 0;
+
+				this.lastRequestUsageAvailable.set(true);
+				this.lastRequestPromptTokens.set(promptTokens);
+				this.lastRequestCompletionTokens.set(completionTokens);
+				this.lastRequestTotalTokens.set(totalTokens);
+				this.lastRequestCachedPromptTokens.set(cachedTokens);
+				this.lastRequestAcceptedPredictionTokens.set(0);
+				this.lastRequestRejectedPredictionTokens.set(0);
+				this.lastRequestMaxPromptTokens.set(maxPromptTokens);
+				this.lastRequestPromptUsagePercent.set(maxPromptTokens > 0 ? Math.max(0, Math.min(1, promptTokens / maxPromptTokens)) : 0);
+
+				this._traceLastRequestUsage('fallback-derive-from-output-hit', {
+					runId,
+					usageKeys: this._safeObjectKeys(derived),
+					promptTokens,
+					completionTokens,
+					totalTokens,
+					cachedTokens,
+					maxPromptTokens,
+				});
+			})();
+		}
+	}
+
+	private _setInputContextUsage(historyTokens: number, attachmentTokens: number, modeTokens: number, draftTokens: number, maxTokens: number): void {
+		const totalTokens = historyTokens + attachmentTokens + modeTokens + draftTokens;
+		this.inputContextHistoryTokens.set(historyTokens);
+		this.inputContextAttachmentTokens.set(attachmentTokens);
+		this.inputContextModeTokens.set(modeTokens);
+		this.inputContextDraftTokens.set(draftTokens);
+		this.inputContextTokens.set(totalTokens);
+		this.inputContextMaxTokens.set(maxTokens);
+		this.inputContextUsagePercent.set(maxTokens > 0 ? Math.min(1, totalTokens / maxTokens) : 0);
+	}
+
+	private async _buildContextTextForTokenCount(token: CancellationToken): Promise<{ historyText: string; attachmentsText: string; modeText: string; draftText: string }> {
+		const historyParts: string[] = [];
+
+		const chatModel = this._widget?.viewModel?.model;
+		if (chatModel) {
+			for (const request of chatModel.getRequests()) {
+				const requestText = getPromptText(request.message).message;
+				if (requestText) {
+					historyParts.push(requestText);
+				}
+
+				const responseText = request.response?.entireResponse.toString();
+				if (responseText) {
+					historyParts.push(responseText);
+				}
+			}
+		}
+
+		const currentInput = this._inputEditor?.getValue();
+		const modeText = this.currentModeInfo.modeInstructions?.content ?? '';
+
+		const attachmentsParts: string[] = [];
+		const sessionResource = this._widget?.viewModel?.model?.sessionResource;
+		if (sessionResource) {
+			const attached = this.getAttachedAndImplicitContext(sessionResource).asArray();
+			for (const entry of attached) {
+				if (token.isCancellationRequested) {
+					break;
+				}
+
+				switch (entry.kind) {
+					case 'file': {
+						let uri: URI | undefined;
+						let range: { startLineNumber: number; endLineNumber: number } | undefined;
+						const value = entry.value;
+						if (URI.isUri(value)) {
+							uri = value;
+						} else if (value && typeof value === 'object') {
+							const recordValue = value as Record<string, unknown>;
+							if (Object.prototype.hasOwnProperty.call(recordValue, 'uri')) {
+								const candidateUri = recordValue.uri;
+								if (URI.isUri(candidateUri)) {
+									uri = candidateUri;
+								}
+							}
+							if (Object.prototype.hasOwnProperty.call(recordValue, 'range')) {
+								const candidateRange = recordValue.range;
+								if (candidateRange && typeof candidateRange === 'object') {
+									const rangeRecord = candidateRange as Record<string, unknown>;
+									const hasStart = Object.prototype.hasOwnProperty.call(rangeRecord, 'startLineNumber');
+									const hasEnd = Object.prototype.hasOwnProperty.call(rangeRecord, 'endLineNumber');
+									if (hasStart && hasEnd) {
+										range = {
+											startLineNumber: Number(rangeRecord.startLineNumber as unknown),
+											endLineNumber: Number(rangeRecord.endLineNumber as unknown),
+										};
+									}
+								}
+							}
+						}
+
+						if (!uri) {
+							break;
+						}
+
+						try {
+							const read = await this.fileService.readFile(uri);
+							if (token.isCancellationRequested) {
+								break;
+							}
+
+							const fullText = (read.value instanceof VSBuffer ? read.value.toString() : String(read.value));
+							let text = fullText;
+							if (range && Number.isFinite(range.startLineNumber) && Number.isFinite(range.endLineNumber)) {
+								const lines = fullText.split(/\r\n|\r|\n/);
+								const start = Math.max(1, Math.min(lines.length, range.startLineNumber));
+								const end = Math.max(start, Math.min(lines.length, range.endLineNumber));
+								text = lines.slice(start - 1, end).join('\n');
+							}
+
+							const capped = text.length > 100_000 ? text.slice(0, 100_000) : text;
+							if (capped) {
+								attachmentsParts.push(capped);
+							}
+						} catch {
+							// Ignore unreadable files; the token estimate will be lower.
+						}
+						break;
+					}
+					case 'promptText': {
+						const value = typeof entry.value === 'string' ? entry.value : '';
+						if (value) {
+							attachmentsParts.push(value);
+						}
+						break;
+					}
+					case 'string': {
+						const value = typeof entry.value === 'string' ? entry.value : '';
+						if (value) {
+							attachmentsParts.push(value);
+						}
+						break;
+					}
+					case 'paste': {
+						if (entry.pastedLines) {
+							attachmentsParts.push(entry.pastedLines);
+						} else if (entry.code) {
+							attachmentsParts.push(entry.code);
+						}
+						break;
+					}
+					case 'terminalCommand': {
+						const pieces: string[] = [];
+						if (entry.command) {
+							pieces.push(entry.command);
+						}
+						if (typeof entry.output === 'string' && entry.output) {
+							pieces.push(entry.output);
+						}
+						if (pieces.length) {
+							attachmentsParts.push(pieces.join('\n'));
+						}
+						break;
+					}
+					case 'promptFile': {
+						// Prompt files/instructions are often the biggest hidden contributor.
+						// Try to read them and include a capped prefix so the estimate tracks reality better.
+						try {
+							const read = await this.fileService.readFile(entry.value);
+							if (token.isCancellationRequested) {
+								break;
+							}
+							const text = (read.value instanceof VSBuffer ? read.value.toString() : String(read.value));
+							const capped = text.length > 100_000 ? text.slice(0, 100_000) : text;
+							if (capped) {
+								attachmentsParts.push(capped);
+							}
+						} catch {
+							// Ignore unreadable prompt files; the token estimate will be lower.
+						}
+						break;
+					}
+					default:
+						// Many attachment kinds are references (files, symbols, problems, images) whose
+						// *actual* prompt representation is agent-specific. We don't try to expand them here.
+						break;
+				}
+			}
+		}
+
+		return {
+			historyText: historyParts.join('\n\n'),
+			attachmentsText: attachmentsParts.join('\n\n'),
+			modeText,
+			draftText: currentInput ?? ''
+		};
+	}
+
+	private async _computeTokenLengthWithFallback(modelId: string, text: string, token: CancellationToken): Promise<number> {
+		if (!text) {
+			return 0;
+		}
+		try {
+			return await this.languageModelsService.computeTokenLength(modelId, text, token);
+		} catch (err) {
+			if (token.isCancellationRequested) {
+				return 0;
+			}
+			this.logService.trace('[chat] Failed to compute token length, using heuristic fallback', err);
+			// Rough heuristic: 4 chars ~= 1 token
+			return Math.ceil(text.length / 4);
+		}
+	}
+
+	private async _recomputeInputContextUsage(): Promise<void> {
+		const model = this._currentLanguageModel;
+		const maxTokens = model?.metadata.maxInputTokens ?? 0;
+
+		if (!model || maxTokens <= 0) {
+			this._setInputContextUsage(0, 0, 0, 0, maxTokens);
+			return;
+		}
+
+		this._recomputeInputContextUsageCts?.cancel();
+		this._recomputeInputContextUsageCts?.dispose();
+		const cts = new CancellationTokenSource();
+		this._recomputeInputContextUsageCts = cts;
+		const runId = ++this._recomputeInputContextUsageRunCounter;
+
+		const { historyText, attachmentsText, modeText, draftText } = await this._buildContextTextForTokenCount(cts.token);
+		if (cts.token.isCancellationRequested) {
+			return;
+		}
+
+		let historyTokens = 0;
+		let attachmentTokens = 0;
+		let modeTokens = 0;
+		let draftTokens = 0;
+		try {
+			historyTokens = await this._computeTokenLengthWithFallback(model.identifier, historyText, cts.token);
+			if (cts.token.isCancellationRequested) {
+				return;
+			}
+			attachmentTokens = await this._computeTokenLengthWithFallback(model.identifier, attachmentsText, cts.token);
+			if (cts.token.isCancellationRequested) {
+				return;
+			}
+			modeTokens = await this._computeTokenLengthWithFallback(model.identifier, modeText, cts.token);
+			if (cts.token.isCancellationRequested) {
+				return;
+			}
+			draftTokens = await this._computeTokenLengthWithFallback(model.identifier, draftText, cts.token);
+		} finally {
+			if (this._recomputeInputContextUsageCts === cts) {
+				this._recomputeInputContextUsageCts = undefined;
+			}
+			cts.dispose();
+		}
+
+		if (runId !== this._recomputeInputContextUsageRunCounter) {
+			return;
+		}
+
+		this._setInputContextUsage(historyTokens, attachmentTokens, modeTokens, draftTokens, maxTokens);
 	}
 
 	get contentHeight(): number {

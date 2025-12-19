@@ -38,6 +38,73 @@ export namespace ChatContextKeys {
 	export const chatToolCount = new RawContextKey<number>('chatToolCount', 0, { type: 'number', description: localize('chatToolCount', "The number of tools available in the current agent.") });
 	export const chatToolGroupingThreshold = new RawContextKey<number>('chat.toolGroupingThreshold', 0, { type: 'number', description: localize('chatToolGroupingThreshold', "The number of tools at which we start doing virtual grouping.") });
 
+	/**
+	 * Approximate total tokens in the prompt/context for the current chat input.
+	 */
+	export const inputContextTokens = new RawContextKey<number>('chatInputContextTokens', 0, { type: 'number', description: localize('chatInputContextTokens', 'Approximate token count of the prompt/context for the current chat input.') });
+	/**
+	 * Approximate tokens in chat history (previous requests + responses), excluding the current draft input.
+	 */
+	export const inputContextHistoryTokens = new RawContextKey<number>('chatInputContextHistoryTokens', 0, { type: 'number', description: localize('chatInputContextHistoryTokens', 'Approximate token count contributed by chat history (previous requests and responses).') });
+	/**
+	 * Approximate tokens in the current draft input.
+	 */
+	export const inputContextDraftTokens = new RawContextKey<number>('chatInputContextDraftTokens', 0, { type: 'number', description: localize('chatInputContextDraftTokens', 'Approximate token count contributed by the current draft input.') });
+	/**
+	 * Approximate tokens contributed by attachments/instructions (prompt files, prompt text, paste, terminal output, etc.).
+	 */
+	export const inputContextAttachmentTokens = new RawContextKey<number>('chatInputContextAttachmentTokens', 0, { type: 'number', description: localize('chatInputContextAttachmentTokens', 'Approximate token count contributed by attachments and instructions.') });
+	/**
+	 * Approximate tokens contributed by the current chat mode instructions.
+	 */
+	export const inputContextModeTokens = new RawContextKey<number>('chatInputContextModeTokens', 0, { type: 'number', description: localize('chatInputContextModeTokens', 'Approximate token count contributed by the current chat mode instructions.') });
+	/**
+	 * Max input tokens for the currently selected language model.
+	 */
+	export const inputContextMaxTokens = new RawContextKey<number>('chatInputContextMaxTokens', 0, { type: 'number', description: localize('chatInputContextMaxTokens', 'Maximum number of input tokens supported by the currently selected language model.') });
+	/**
+	 * Ratio of {@link inputContextTokens} to {@link inputContextMaxTokens}, in the range [0, 1].
+	 */
+	export const inputContextUsagePercent = new RawContextKey<number>('chatInputContextUsagePercent', 0, { type: 'number', description: localize('chatInputContextUsagePercent', 'Approximate context usage ratio for the current chat input, from 0 to 1.') });
+
+	// --- Model-reported usage (last completed request) ---
+	/**
+	 * True when we have model-reported usage data for the last completed request.
+	 */
+	export const lastRequestUsageAvailable = new RawContextKey<boolean>('chatLastRequestUsageAvailable', false, { type: 'boolean', description: localize('chatLastRequestUsageAvailable', 'True when model-reported token usage for the last completed request is available.') });
+	/**
+	 * Prompt tokens used for the last completed request (as reported by the model/provider).
+	 */
+	export const lastRequestPromptTokens = new RawContextKey<number>('chatLastRequestPromptTokens', 0, { type: 'number', description: localize('chatLastRequestPromptTokens', 'Prompt tokens used for the last completed request (model-reported).') });
+	/**
+	 * Completion tokens used for the last completed request (as reported by the model/provider).
+	 */
+	export const lastRequestCompletionTokens = new RawContextKey<number>('chatLastRequestCompletionTokens', 0, { type: 'number', description: localize('chatLastRequestCompletionTokens', 'Completion tokens used for the last completed request (model-reported).') });
+	/**
+	 * Total tokens used for the last completed request (as reported by the model/provider).
+	 */
+	export const lastRequestTotalTokens = new RawContextKey<number>('chatLastRequestTotalTokens', 0, { type: 'number', description: localize('chatLastRequestTotalTokens', 'Total tokens used for the last completed request (model-reported).') });
+	/**
+	 * Cached prompt tokens for the last completed request, if reported.
+	 */
+	export const lastRequestCachedPromptTokens = new RawContextKey<number>('chatLastRequestCachedPromptTokens', 0, { type: 'number', description: localize('chatLastRequestCachedPromptTokens', 'Cached prompt tokens for the last completed request (model-reported).') });
+	/**
+	 * Accepted prediction tokens for the last completed request, if reported.
+	 */
+	export const lastRequestAcceptedPredictionTokens = new RawContextKey<number>('chatLastRequestAcceptedPredictionTokens', 0, { type: 'number', description: localize('chatLastRequestAcceptedPredictionTokens', 'Accepted prediction tokens for the last completed request (model-reported).') });
+	/**
+	 * Rejected prediction tokens for the last completed request, if reported.
+	 */
+	export const lastRequestRejectedPredictionTokens = new RawContextKey<number>('chatLastRequestRejectedPredictionTokens', 0, { type: 'number', description: localize('chatLastRequestRejectedPredictionTokens', 'Rejected prediction tokens for the last completed request (model-reported).') });
+	/**
+	 * Max prompt tokens that applied for the last request, if reported.
+	 */
+	export const lastRequestMaxPromptTokens = new RawContextKey<number>('chatLastRequestMaxPromptTokens', 0, { type: 'number', description: localize('chatLastRequestMaxPromptTokens', 'Max prompt tokens that applied for the last request (model-reported).') });
+	/**
+	 * Ratio of {@link lastRequestPromptTokens} to {@link lastRequestMaxPromptTokens}, in the range [0, 1].
+	 */
+	export const lastRequestPromptUsagePercent = new RawContextKey<number>('chatLastRequestPromptUsagePercent', 0, { type: 'number', description: localize('chatLastRequestPromptUsagePercent', 'Prompt token usage ratio for the last completed request (model-reported), from 0 to 1.') });
+
 	export const supported = ContextKeyExpr.or(IsWebContext.negate(), RemoteNameContext.notEqualsTo(''), ContextKeyExpr.has('config.chat.experimental.serverlessWebEnabled'));
 	export const enabled = new RawContextKey<boolean>('chatIsEnabled', false, { type: 'boolean', description: localize('chatIsEnabled', "True when chat is enabled because a default chat participant is activated with an implementation.") });
 
