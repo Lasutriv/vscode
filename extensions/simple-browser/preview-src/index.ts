@@ -29,7 +29,41 @@ const backButton = header.querySelector<HTMLButtonElement>('.back-button')!;
 const reloadButton = header.querySelector<HTMLButtonElement>('.reload-button')!;
 const openExternalButton = header.querySelector<HTMLButtonElement>('.open-external-button')!;
 
+let pendingInputUrlUpdate: string | undefined;
+
+function setCurrentUrl(url: string): void {
+	// Always persist the last known URL so restores/reloads behave intuitively.
+	vscode.setState({ url });
+
+	// Avoid clobbering the user's typing in the address bar.
+	if (document.activeElement === input) {
+		pendingInputUrlUpdate = url;
+		return;
+	}
+
+	if (input.value !== url) {
+		input.value = url;
+	}
+	pendingInputUrlUpdate = undefined;
+}
+
 window.addEventListener('message', e => {
+	// Messages from the embedded page (iframe) are cross-origin; the only safe way to
+	// observe SPA route changes is via postMessage from the app.
+	if (e.source === iframe.contentWindow) {
+		const data = e.data as { type?: unknown; url?: unknown } | undefined;
+		if (data && data.type === 'simpleBrowser.urlChanged' && typeof data.url === 'string') {
+			setCurrentUrl(data.url);
+			return;
+		}
+	}
+
+	// Messages from the extension host.
+	if (e.data?.type === 'didNavigate' && typeof e.data.url === 'string') {
+		setCurrentUrl(e.data.url);
+		return;
+	}
+
 	switch (e.data.type) {
 		case 'focus':
 			{
@@ -81,7 +115,18 @@ onceDocumentLoaded(() => {
 	}, 50);
 
 	iframe.addEventListener('load', () => {
-		// Noop
+		// Ask the embedded page (if it supports it) to start reporting URL changes.
+		try {
+			iframe.contentWindow?.postMessage({ type: 'simpleBrowser.init' }, '*');
+		} catch {
+			// Noop
+		}
+	});
+
+	input.addEventListener('blur', () => {
+		if (pendingInputUrlUpdate) {
+			setCurrentUrl(pendingInputUrlUpdate);
+		}
 	});
 
 	input.addEventListener('change', e => {
@@ -134,7 +179,7 @@ onceDocumentLoaded(() => {
 			iframe.src = rawUrl;
 		}
 
-		vscode.setState({ url: rawUrl });
+		setCurrentUrl(rawUrl);
 	}
 });
 

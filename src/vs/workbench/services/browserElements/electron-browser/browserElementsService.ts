@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { BrowserType, IConsoleLogsResult, IElementData, INativeBrowserElementsService } from '../../../../platform/browserElements/common/browserElements.js';
+import { BrowserType, IConsoleLogsResult, ICurrentUrlResult, IElementData, INativeBrowserElementsService } from '../../../../platform/browserElements/common/browserElements.js';
 import { IRectangle } from '../../../../platform/window/common/window.js';
 import { ipcRenderer } from '../../../../base/parts/sandbox/electron-browser/globals.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
@@ -12,6 +12,8 @@ import { IBrowserElementsService } from '../browser/browserElementsService.js';
 import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
 import { INativeWorkbenchEnvironmentService } from '../../environment/electron-browser/environmentService.js';
 import { NativeBrowserElementsService } from '../../../../platform/browserElements/common/nativeBrowserElementsService.js';
+import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
+import type { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 
 class WorkbenchNativeBrowserElementsService extends NativeBrowserElementsService {
 
@@ -26,6 +28,7 @@ class WorkbenchNativeBrowserElementsService extends NativeBrowserElementsService
 let cancelSelectionIdPool = 0;
 let cancelAndDetachIdPool = 0;
 let cancelConsoleLogsIdPool = 0;
+let cancelCurrentUrlIdPool = 0;
 
 class WorkbenchBrowserElementsService implements IBrowserElementsService {
 	_serviceBrand: undefined;
@@ -85,7 +88,27 @@ class WorkbenchBrowserElementsService implements IBrowserElementsService {
 			disposable.dispose();
 		}
 	}
+
+	async getCurrentUrl(token: CancellationToken, browserType: BrowserType): Promise<ICurrentUrlResult> {
+		const cancelId = cancelCurrentUrlIdPool++;
+		const onCancelChannel = `vscode:cancelCurrentUrl${cancelId}`;
+		const disposable = token.onCancellationRequested(() => {
+			ipcRenderer.send(onCancelChannel, cancelId);
+		});
+		try {
+			return await this.simpleBrowser.getCurrentUrl(token, browserType);
+		} catch (error) {
+			return { success: false, url: '', error: String(error) };
+		} finally {
+			disposable.dispose();
+		}
+	}
 }
 
 registerSingleton(IBrowserElementsService, WorkbenchBrowserElementsService, InstantiationType.Delayed);
 registerSingleton(INativeBrowserElementsService, WorkbenchNativeBrowserElementsService, InstantiationType.Delayed);
+
+CommandsRegistry.registerCommand('simpleBrowser.getCurrentUrl', async (accessor: ServicesAccessor) => {
+	const browserElementsService = accessor.get(IBrowserElementsService);
+	return browserElementsService.getCurrentUrl(CancellationToken.None, BrowserType.SimpleBrowser);
+});

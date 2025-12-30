@@ -35,6 +35,12 @@ interface ConsoleLogsResponse {
 	readonly error?: string;
 }
 
+interface CurrentUrlResult {
+	readonly success: boolean;
+	readonly url: string;
+	readonly error?: string;
+}
+
 export interface ConsoleCaptureResult {
 	readonly success: boolean;
 	readonly url: string;
@@ -75,6 +81,8 @@ export class SimpleBrowserView extends Disposable {
 
 	private _pendingScreenshotResolve?: (value: string | undefined) => void;
 	private _pendingConsoleLogsResolve?: (value: ConsoleCaptureResult) => void;
+	private _urlSyncInterval: NodeJS.Timeout | undefined;
+	private _lastSyncedUrl: string | undefined;
 
 	public static create(
 		extensionUri: vscode.Uri,
@@ -184,11 +192,54 @@ export class SimpleBrowserView extends Disposable {
 		}));
 
 		this.show(url);
+		this.startUrlSync();
 	}
 
 	public override dispose() {
+		if (this._urlSyncInterval) {
+			clearInterval(this._urlSyncInterval);
+			this._urlSyncInterval = undefined;
+		}
 		this._onDidDispose.fire();
 		super.dispose();
+	}
+
+	private startUrlSync(): void {
+		// URL tracking uses a desktop-only command backed by Electron's CDP.
+		if (vscode.env.uiKind !== vscode.UIKind.Desktop) {
+			return;
+		}
+
+		// Avoid multiple timers if the panel is restored/recreated.
+		if (this._urlSyncInterval) {
+			return;
+		}
+
+		this._urlSyncInterval = setInterval(async () => {
+			if (!this._webviewPanel.visible) {
+				return;
+			}
+			try {
+				const result = await vscode.commands.executeCommand<CurrentUrlResult>('simpleBrowser.getCurrentUrl');
+				if (!result?.success || typeof result.url !== 'string' || !result.url) {
+					return;
+				}
+
+				if (result.url !== this._lastSyncedUrl) {
+					this._lastSyncedUrl = result.url;
+					this._webviewPanel.webview.postMessage({
+						type: 'didNavigate',
+						url: result.url,
+					});
+				}
+			} catch {
+				// If the command is not available (e.g. web), stop polling.
+				if (this._urlSyncInterval) {
+					clearInterval(this._urlSyncInterval);
+					this._urlSyncInterval = undefined;
+				}
+			}
+		}, 500);
 	}
 
 	public show(url: string, options?: ShowOptions) {

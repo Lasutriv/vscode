@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { BrowserType, IConsoleLogsResult, IConsoleLogEntry, IElementData, INativeBrowserElementsService } from '../common/browserElements.js';
+import { BrowserType, IConsoleLogsResult, IConsoleLogEntry, ICurrentUrlResult, IElementData, INativeBrowserElementsService } from '../common/browserElements.js';
 import { ILogService } from '../../log/common/log.js';
 import { CancellationToken } from '../../../base/common/cancellation.js';
 import { IRectangle } from '../../window/common/window.js';
@@ -31,6 +31,14 @@ interface TargetInfo {
 	type?: string;
 }
 
+interface IFrameInfo {
+	src: string;
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+}
+
 export class NativeBrowserElementsMainService extends Disposable implements INativeBrowserElementsMainService {
 	_serviceBrand: undefined;
 
@@ -47,10 +55,134 @@ export class NativeBrowserElementsMainService extends Disposable implements INat
 
 	get windowId(): never { throw new Error('Not implemented in electron-main'); }
 
+	private findHostWebviewContents(window: BrowserWindow, browserType: BrowserType): Electron.WebContents | undefined {
+		const allWebContents = webContents.getAllWebContents();
+		const hostId = window.webContents.id;
+
+		const matchesBrowserType = (url: string) => {
+			if (browserType === BrowserType.SimpleBrowser) {
+				return url.includes('simple-browser');
+			}
+			if (browserType === BrowserType.LiveServer) {
+				return url.includes('browser-preview') || url.includes('live-server');
+			}
+			return false;
+		};
+
+		let hostedWebview = allWebContents.find(webContent => {
+			try {
+				return webContent.getType?.() === 'webview'
+					&& webContent.hostWebContents?.id === hostId
+					&& matchesBrowserType(webContent.getURL());
+			} catch {
+				return false;
+			}
+		});
+
+		// Fallback to old heuristic (in case hostWebContents is not set as expected)
+		if (!hostedWebview) {
+			hostedWebview = allWebContents.find(webContent => {
+				try {
+					return webContent.getType?.() === 'webview' && matchesBrowserType(webContent.getURL());
+				} catch {
+					return false;
+				}
+			});
+		}
+
+		return hostedWebview;
+	}
+
+	private parseTargetUrl(targetInfo: TargetInfo): URL | undefined {
+		try {
+			return new URL(targetInfo.url);
+		} catch {
+			return undefined;
+		}
+	}
+
+	private async getSimpleBrowserTargets(debuggers: Electron.Debugger): Promise<{ outerTargetId?: string; contentTargetId?: string }> {
+		const targetInfosResult = await (debuggers.sendCommand as unknown as (command: string) => Promise<unknown>)('Target.getTargets');
+		const { targetInfos } = targetInfosResult as { targetInfos: TargetInfo[] };
+
+		const outerTargets: Array<{ info: TargetInfo; url: URL }> = [];
+		const candidates: Array<{ info: TargetInfo; url: URL; reqId?: number }> = [];
+
+		for (const info of targetInfos) {
+			const url = this.parseTargetUrl(info);
+			if (!url) {
+				continue;
+			}
+
+			if (url.searchParams.get('extensionId') === 'vscode.simple-browser') {
+				outerTargets.push({ info, url });
+			}
+
+			if (url.searchParams.has('vscodeBrowserReqId')) {
+				const reqIdRaw = url.searchParams.get('vscodeBrowserReqId');
+				const reqId = reqIdRaw ? Number(reqIdRaw) : undefined;
+				candidates.push({ info, url, reqId: Number.isFinite(reqId) ? reqId : undefined });
+			}
+		}
+
+		const outerTarget = outerTargets.find(t => t.url.searchParams.has('id')) ?? outerTargets[0];
+		const outerId = outerTarget?.url.searchParams.get('id');
+
+		const matchingContentCandidates = outerId
+			? candidates.filter(t => t.url.searchParams.get('id') === outerId)
+			: candidates;
+
+		matchingContentCandidates.sort((a, b) => (b.reqId ?? 0) - (a.reqId ?? 0));
+		const contentTarget = matchingContentCandidates[0];
+
+		return {
+			outerTargetId: outerTarget?.info.targetId,
+			contentTargetId: contentTarget?.info.targetId
+		};
+	}
+
+	private async getTopLevelIFrameInfo(debuggers: Electron.Debugger, sessionId: string): Promise<IFrameInfo | undefined> {
+		try {
+			const evalResult = await debuggers.sendCommand('Runtime.evaluate', {
+				expression: `(() => {
+					const iframes = Array.from(document.querySelectorAll('iframe'));
+					const infos = iframes.map(iframe => {
+						const rect = iframe.getBoundingClientRect();
+						return {
+							src: iframe.src || iframe.getAttribute('src') || '',
+							x: rect.x,
+							y: rect.y,
+							width: rect.width,
+							height: rect.height
+						};
+					});
+					infos.sort((a, b) => (b.width * b.height) - (a.width * a.height));
+					return infos[0] || null;
+				})()`,
+				returnByValue: true,
+			}, sessionId);
+
+			const value = (evalResult as { result?: { value?: IFrameInfo | null } }).result?.value;
+			return value ?? undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
 	async findWebviewTarget(debuggers: Electron.Debugger, windowId: number, browserType: BrowserType): Promise<string | undefined> {
 		const targetInfosResult = await (debuggers.sendCommand as unknown as (command: string) => Promise<unknown>)('Target.getTargets');
 		const { targetInfos } = targetInfosResult as { targetInfos: TargetInfo[] };
 		this.logService.info(`[browserElements] findWebviewTarget: inspecting ${targetInfos.length} targets for windowId=${windowId} browserType=${browserType}`);
+
+		if (browserType === BrowserType.SimpleBrowser) {
+			const { outerTargetId, contentTargetId } = await this.getSimpleBrowserTargets(debuggers);
+			if (contentTargetId) {
+				return contentTargetId;
+			}
+			if (outerTargetId) {
+				return outerTargetId;
+			}
+		}
 
 		// First try strict parameter matching
 		const matchingTarget = targetInfos.find((targetInfo: { url: string }) => {
@@ -148,15 +280,13 @@ export class NativeBrowserElementsMainService extends Disposable implements INat
 			return undefined;
 		}
 
-		// Find the simple browser webview
-		const allWebContents = webContents.getAllWebContents();
-		const simpleBrowserWebview = allWebContents.find(webContent => webContent.id === window.id);
+		const hostedWebview = this.findHostWebviewContents(window.win, browserType);
 
-		if (!simpleBrowserWebview) {
+		if (!hostedWebview) {
 			return undefined;
 		}
 
-		const debuggers = simpleBrowserWebview.debugger;
+		const debuggers = hostedWebview.debugger;
 		if (!debuggers.isAttached()) {
 			debuggers.attach();
 		}
@@ -213,24 +343,59 @@ export class NativeBrowserElementsMainService extends Disposable implements INat
 			return undefined;
 		}
 
-		// Find the simple browser webview
-		const allWebContents = webContents.getAllWebContents();
-		const simpleBrowserWebview = allWebContents.find(webContent => webContent.id === window.id);
+		const hostedWebview = this.findHostWebviewContents(window.win, browserType);
 
-		if (!simpleBrowserWebview) {
+		if (!hostedWebview) {
 			return undefined;
 		}
 
-		const debuggers = simpleBrowserWebview.debugger;
+		const debuggers = hostedWebview.debugger;
 		if (!debuggers.isAttached()) {
 			debuggers.attach();
 		}
 
 		let targetSessionId: string | undefined = undefined;
+		let iframeOffset: IRectangle | undefined;
+		let shouldApplyIFrameOffset = false;
 		try {
-			const targetId = await this.findWebviewTarget(debuggers, windowId!, browserType);
+			let targetId = await this.findWebviewTarget(debuggers, windowId!, browserType);
+			if (!targetId) {
+				throw new Error('No target found');
+			}
+
+			// For Simple Browser, attempt to attach to both outer + content targets so we can
+			// accurately translate element bounds from iframe coordinates into the webview.
+			if (browserType === BrowserType.SimpleBrowser) {
+				const { outerTargetId, contentTargetId } = await this.getSimpleBrowserTargets(debuggers);
+				shouldApplyIFrameOffset = Boolean(contentTargetId);
+				if (outerTargetId) {
+					const { sessionId: outerSessionId } = await debuggers.sendCommand('Target.attachToTarget', {
+						targetId: outerTargetId,
+						flatten: true,
+					});
+
+					try {
+						await debuggers.sendCommand('Runtime.enable', {}, outerSessionId);
+						const iframe = await this.getTopLevelIFrameInfo(debuggers, outerSessionId);
+						if (iframe && iframe.width > 0 && iframe.height > 0) {
+							iframeOffset = { x: iframe.x, y: iframe.y, width: iframe.width, height: iframe.height };
+						}
+					} finally {
+						try {
+							await debuggers.sendCommand('Target.detachFromTarget', { sessionId: outerSessionId }, undefined);
+						} catch {
+							// ignore
+						}
+					}
+				}
+
+				if (contentTargetId) {
+					targetId = contentTargetId;
+				}
+			}
+
 			const { sessionId } = await debuggers.sendCommand('Target.attachToTarget', {
-				targetId: targetId,
+				targetId,
 				flatten: true,
 			});
 
@@ -305,10 +470,12 @@ export class NativeBrowserElementsMainService extends Disposable implements INat
 		const nodeData = await this.getNodeData(targetSessionId, debuggers, window.win, cancellationId);
 		await this.finishOverlay(debuggers, targetSessionId);
 
-		const zoomFactor = simpleBrowserWebview.getZoomFactor();
+		const zoomFactor = hostedWebview.getZoomFactor();
+		const offsetX = shouldApplyIFrameOffset ? (iframeOffset?.x ?? 0) : 0;
+		const offsetY = shouldApplyIFrameOffset ? (iframeOffset?.y ?? 0) : 0;
 		const absoluteBounds = {
-			x: rect.x + nodeData.bounds.x,
-			y: rect.y + nodeData.bounds.y,
+			x: rect.x + offsetX + nodeData.bounds.x,
+			y: rect.y + offsetY + nodeData.bounds.y,
 			width: nodeData.bounds.width,
 			height: nodeData.bounds.height
 		};
@@ -363,7 +530,7 @@ export class NativeBrowserElementsMainService extends Disposable implements INat
 						const content = model.content;
 						const margin = model.margin;
 						const x = Math.min(margin[0], content[0]);
-						const y = Math.min(margin[1], content[1]) + 32.4; // 32.4 is height of the title bar
+						const y = Math.min(margin[1], content[1]);
 						const width = Math.max(margin[2] - margin[0], content[2] - content[0]);
 						const height = Math.max(margin[5] - margin[1], content[5] - content[1]);
 
@@ -558,6 +725,93 @@ export class NativeBrowserElementsMainService extends Disposable implements INat
 			}
 			this.logService.error(`[browserElements] consoleLogs: error during capture`, error);
 			return { success: false, url: targetUrl, logs: [], error: String(error) };
+		}
+	}
+
+	async getCurrentUrl(windowId: number | undefined, token: CancellationToken, browserType: BrowserType): Promise<ICurrentUrlResult> {
+		this.logService.trace(`[browserElements] currentUrl: invoked windowId=${windowId} browserType=${browserType}`);
+		if (typeof windowId !== 'number') {
+			return { success: false, url: '', error: 'Window not found' };
+		}
+		const window = this.windowById(windowId);
+		if (!window?.win) {
+			return { success: false, url: '', error: 'Window not found' };
+		}
+		const windowWin = window.win;
+		if (!windowWin) {
+			return { success: false, url: '', error: 'Window not found' };
+		}
+
+		const allWebContents = webContents.getAllWebContents();
+		let simpleBrowserWebview = allWebContents.find(webContent => {
+			try {
+				return webContent.getType?.() === 'webview'
+					&& webContent.hostWebContents?.id === windowWin.webContents.id
+					&& webContent.getURL().includes('simple-browser');
+			} catch {
+				return false;
+			}
+		});
+
+		// Fallback to old heuristic (in case hostWebContents is not set as expected)
+		if (!simpleBrowserWebview) {
+			simpleBrowserWebview = allWebContents.find(webContent => {
+				try {
+					return webContent.getType?.() === 'webview'
+						&& webContent.getURL().includes('simple-browser');
+				} catch {
+					return false;
+				}
+			});
+		}
+
+		if (!simpleBrowserWebview) {
+			return { success: false, url: '', error: 'Simple browser webview not found' };
+		}
+
+		const debuggers = simpleBrowserWebview.debugger;
+		const wasAttached = debuggers.isAttached();
+		if (!wasAttached) {
+			debuggers.attach();
+		}
+
+		let targetUrl = '';
+		let sessionId: string | undefined;
+		try {
+			const targetId = await this.findWebviewTarget(debuggers, windowId, browserType);
+			if (!targetId) {
+				return { success: false, url: '', error: 'Could not find browser target' };
+			}
+
+			const attachResult = await debuggers.sendCommand('Target.attachToTarget', {
+				targetId,
+				flatten: true,
+			});
+			sessionId = attachResult.sessionId;
+
+			await debuggers.sendCommand('Runtime.enable', {}, sessionId);
+			const { result } = await debuggers.sendCommand('Runtime.evaluate', {
+				expression: 'window.location.href',
+				returnByValue: true,
+			}, sessionId);
+			targetUrl = result?.value || '';
+
+			await debuggers.sendCommand('Target.detachFromTarget', { sessionId }, undefined);
+			return { success: true, url: targetUrl };
+		} catch (error) {
+			this.logService.error('[browserElements] currentUrl: error', error);
+			return { success: false, url: targetUrl, error: String(error) };
+		} finally {
+			try {
+				if (sessionId) {
+					await debuggers.sendCommand('Target.detachFromTarget', { sessionId }, undefined);
+				}
+			} catch {
+				// ignore
+			}
+			if (!wasAttached && debuggers.isAttached()) {
+				debuggers.detach();
+			}
 		}
 	}
 
