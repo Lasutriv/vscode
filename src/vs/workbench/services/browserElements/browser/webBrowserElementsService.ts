@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { BrowserType, IConsoleLogsResult, IElementData } from '../../../../platform/browserElements/common/browserElements.js';
+import { BrowserType, IConsoleLogsResult, ICurrentUrlResult, IElementData } from '../../../../platform/browserElements/common/browserElements.js';
 import { IRectangle } from '../../../../platform/window/common/window.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { registerSingleton, InstantiationType } from '../../../../platform/instantiation/common/extensions.js';
@@ -24,6 +24,10 @@ class WebBrowserElementsService implements IBrowserElementsService {
 
 	async getConsoleLogs(token: CancellationToken, browserType: BrowserType, durationMs?: number): Promise<IConsoleLogsResult> {
 		return { success: false, url: '', logs: [], error: 'Not implemented in web' };
+	}
+
+	async getCurrentUrl(token: CancellationToken, browserType: BrowserType): Promise<ICurrentUrlResult> {
+		return { success: false, url: '', error: 'Not implemented in web' };
 	}
 }
 

@@ -32,6 +32,12 @@ export interface IConsoleLogsResult {
 	readonly error?: string;
 }
 
+export interface ICurrentUrlResult {
+	readonly success: boolean;
+	readonly url: string;
+	readonly error?: string;
+}
+
 export enum BrowserType {
 	SimpleBrowser = 'simpleBrowser',
 	LiveServer = 'liveServer',
@@ -50,4 +56,6 @@ export interface INativeBrowserElementsService {
 	startDebugSession(token: CancellationToken, browserType: BrowserType, cancelAndDetachId?: number): Promise<void>;
 
 	getConsoleLogs(token: CancellationToken, browserType: BrowserType, durationMs?: number): Promise<IConsoleLogsResult>;
+
+	getCurrentUrl(token: CancellationToken, browserType: BrowserType): Promise<ICurrentUrlResult>;
 }
