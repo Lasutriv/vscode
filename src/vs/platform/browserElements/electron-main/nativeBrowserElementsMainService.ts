@@ -3,8 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { BrowserType, IConsoleLogsResult, IConsoleLogEntry, ICurrentUrlResult, IElementData, INativeBrowserElementsService } from '../common/browserElements.js';
-import { ILogService } from '../../log/common/log.js';
+import { BrowserType, IConsoleLogEntry, IConsoleLogsResult, ICurrentUrlResult, IElementData, INativeBrowserElementsService, IBrowserTargetLocator } from '../common/browserElements.js';
 import { CancellationToken } from '../../../base/common/cancellation.js';
 import { IRectangle } from '../../window/common/window.js';
 import { BrowserWindow, webContents } from 'electron';
@@ -15,6 +14,8 @@ import { IWindowsMainService } from '../../windows/electron-main/windows.js';
 import { createDecorator } from '../../instantiation/common/instantiation.js';
 import { Disposable } from '../../../base/common/lifecycle.js';
 import { AddFirstParameterToFunctions } from '../../../base/common/types.js';
+import { IBrowserViewMainService } from '../../browserView/electron-main/browserViewMainService.js';
+import { ILogService } from '../../log/common/log.js';
 
 export const INativeBrowserElementsMainService = createDecorator<INativeBrowserElementsMainService>('browserElementsMainService');
 export interface INativeBrowserElementsMainService extends AddFirstParameterToFunctions<INativeBrowserElementsService, Promise<unknown> /* only methods, not events */, number | undefined /* window ID */> { }
@@ -25,243 +26,82 @@ interface NodeDataResponse {
 	bounds: IRectangle;
 }
 
-interface TargetInfo {
-	targetId: string;
-	url: string;
-	type?: string;
-}
-
-interface IFrameInfo {
-	src: string;
-	x: number;
-	y: number;
-	width: number;
-	height: number;
-}
-
 export class NativeBrowserElementsMainService extends Disposable implements INativeBrowserElementsMainService {
 	_serviceBrand: undefined;
-
-	currentLocalAddress: string | undefined;
 
 	constructor(
 		@IWindowsMainService private readonly windowsMainService: IWindowsMainService,
 		@IAuxiliaryWindowsMainService private readonly auxiliaryWindowsMainService: IAuxiliaryWindowsMainService,
-		@ILogService private readonly logService: ILogService,
-
+		@IBrowserViewMainService private readonly browserViewMainService: IBrowserViewMainService,
+		@ILogService private readonly logService: ILogService
 	) {
 		super();
 	}
 
 	get windowId(): never { throw new Error('Not implemented in electron-main'); }
 
-	private findHostWebviewContents(window: BrowserWindow, browserType: BrowserType): Electron.WebContents | undefined {
-		const allWebContents = webContents.getAllWebContents();
-		const hostId = window.webContents.id;
+	/**
+	 * Find the webview target that matches the given locator.
+	 * Checks either webviewId or browserViewId depending on what's provided.
+	 */
+	async findWebviewTarget(debuggers: Electron.Debugger, locator: IBrowserTargetLocator): Promise<string | undefined> {
+		const { targetInfos } = await debuggers.sendCommand('Target.getTargets');
 
-		const matchesBrowserType = (url: string) => {
-			if (browserType === BrowserType.SimpleBrowser) {
-				return url.includes('simple-browser');
-			}
-			if (browserType === BrowserType.LiveServer) {
-				return url.includes('browser-preview') || url.includes('live-server');
-			}
-			return false;
-		};
-
-		let hostedWebview = allWebContents.find(webContent => {
-			try {
-				return webContent.getType?.() === 'webview'
-					&& webContent.hostWebContents?.id === hostId
-					&& matchesBrowserType(webContent.getURL());
-			} catch {
-				return false;
-			}
-		});
-
-		// Fallback to old heuristic (in case hostWebContents is not set as expected)
-		if (!hostedWebview) {
-			hostedWebview = allWebContents.find(webContent => {
+		if (locator.webviewId) {
+			let extensionId = '';
+			for (const targetInfo of targetInfos) {
 				try {
-					return webContent.getType?.() === 'webview' && matchesBrowserType(webContent.getURL());
-				} catch {
-					return false;
+					const url = new URL(targetInfo.url);
+					if (url.searchParams.get('id') === locator.webviewId) {
+						extensionId = url.searchParams.get('extensionId') || '';
+						break;
+					}
+				} catch (err) {
+					// ignore
 				}
-			});
-		}
-
-		return hostedWebview;
-	}
-
-	private parseTargetUrl(targetInfo: TargetInfo): URL | undefined {
-		try {
-			return new URL(targetInfo.url);
-		} catch {
-			return undefined;
-		}
-	}
-
-	private async getSimpleBrowserTargets(debuggers: Electron.Debugger): Promise<{ outerTargetId?: string; contentTargetId?: string }> {
-		const targetInfosResult = await (debuggers.sendCommand as unknown as (command: string) => Promise<unknown>)('Target.getTargets');
-		const { targetInfos } = targetInfosResult as { targetInfos: TargetInfo[] };
-
-		const outerTargets: Array<{ info: TargetInfo; url: URL }> = [];
-		const candidates: Array<{ info: TargetInfo; url: URL; reqId?: number }> = [];
-
-		for (const info of targetInfos) {
-			const url = this.parseTargetUrl(info);
-			if (!url) {
-				continue;
 			}
-
-			if (url.searchParams.get('extensionId') === 'vscode.simple-browser') {
-				outerTargets.push({ info, url });
-			}
-
-			if (url.searchParams.has('vscodeBrowserReqId')) {
-				const reqIdRaw = url.searchParams.get('vscodeBrowserReqId');
-				const reqId = reqIdRaw ? Number(reqIdRaw) : undefined;
-				candidates.push({ info, url, reqId: Number.isFinite(reqId) ? reqId : undefined });
-			}
-		}
-
-		const outerTarget = outerTargets.find(t => t.url.searchParams.has('id')) ?? outerTargets[0];
-		const outerId = outerTarget?.url.searchParams.get('id');
-
-		const matchingContentCandidates = outerId
-			? candidates.filter(t => t.url.searchParams.get('id') === outerId)
-			: candidates;
-
-		matchingContentCandidates.sort((a, b) => (b.reqId ?? 0) - (a.reqId ?? 0));
-		const contentTarget = matchingContentCandidates[0];
-
-		return {
-			outerTargetId: outerTarget?.info.targetId,
-			contentTargetId: contentTarget?.info.targetId
-		};
-	}
-
-	private async getTopLevelIFrameInfo(debuggers: Electron.Debugger, sessionId: string): Promise<IFrameInfo | undefined> {
-		try {
-			const evalResult = await debuggers.sendCommand('Runtime.evaluate', {
-				expression: `(() => {
-					const iframes = Array.from(document.querySelectorAll('iframe'));
-					const infos = iframes.map(iframe => {
-						const rect = iframe.getBoundingClientRect();
-						return {
-							src: iframe.src || iframe.getAttribute('src') || '',
-							x: rect.x,
-							y: rect.y,
-							width: rect.width,
-							height: rect.height
-						};
-					});
-					infos.sort((a, b) => (b.width * b.height) - (a.width * a.height));
-					return infos[0] || null;
-				})()`,
-				returnByValue: true,
-			}, sessionId);
-
-			const value = (evalResult as { result?: { value?: IFrameInfo | null } }).result?.value;
-			return value ?? undefined;
-		} catch {
-			return undefined;
-		}
-	}
-
-	async findWebviewTarget(debuggers: Electron.Debugger, windowId: number, browserType: BrowserType): Promise<string | undefined> {
-		const targetInfosResult = await (debuggers.sendCommand as unknown as (command: string) => Promise<unknown>)('Target.getTargets');
-		const { targetInfos } = targetInfosResult as { targetInfos: TargetInfo[] };
-		this.logService.info(`[browserElements] findWebviewTarget: inspecting ${targetInfos.length} targets for windowId=${windowId} browserType=${browserType}`);
-
-		if (browserType === BrowserType.SimpleBrowser) {
-			const { outerTargetId, contentTargetId } = await this.getSimpleBrowserTargets(debuggers);
-			if (contentTargetId) {
-				return contentTargetId;
-			}
-			if (outerTargetId) {
-				return outerTargetId;
-			}
-		}
-
-		// First try strict parameter matching
-		const matchingTarget = targetInfos.find((targetInfo: { url: string }) => {
-			try {
-				const url = new URL(targetInfo.url);
-				if (browserType === BrowserType.LiveServer) {
-					return url.searchParams.get('id') && url.searchParams.get('extensionId') === 'ms-vscode.live-server';
-				} else if (browserType === BrowserType.SimpleBrowser) {
-					return url.searchParams.get('parentId') === windowId.toString() && url.searchParams.get('extensionId') === 'vscode.simple-browser';
-				}
-				return false;
-			} catch {
-				return false;
-			}
-		});
-
-		if (matchingTarget) {
-			let resultId: string | undefined;
-			try {
-				const url = new URL(matchingTarget.url);
-				resultId = url.searchParams.get('id')!;
-			} catch {
+			if (!extensionId) {
 				return undefined;
 			}
 
-			const strictTarget = targetInfos.find((targetInfo: { url: string }) => {
+			// search for webview via search parameters
+			const target = targetInfos.find((targetInfo: { url: string }) => {
 				try {
 					const url = new URL(targetInfo.url);
-					const isLiveServer = browserType === BrowserType.LiveServer && url.searchParams.get('serverWindowId') === resultId;
-					const isSimpleBrowser = browserType === BrowserType.SimpleBrowser && url.searchParams.get('id') === resultId && url.searchParams.has('vscodeBrowserReqId');
+					const isLiveServer = extensionId === 'ms-vscode.live-server' && url.searchParams.get('serverWindowId') === locator.webviewId;
+					const isSimpleBrowser = extensionId === 'vscode.simple-browser' && url.searchParams.get('id') === locator.webviewId && url.searchParams.has('vscodeBrowserReqId');
 					if (isLiveServer || isSimpleBrowser) {
-						this.currentLocalAddress = url.origin;
 						return true;
 					}
 					return false;
-				} catch {
+				} catch (e) {
 					return false;
 				}
 			});
-
-			if (strictTarget) {
-				return strictTarget.targetId;
-			}
+			return target?.targetId;
 		}
 
-		// Fallback: look for matching origin or simple-browser extension markers
-		const target = targetInfos.find((targetInfo: { url: string }) => {
-			try {
-				const url = new URL(targetInfo.url);
-				return (this.currentLocalAddress === url.origin)
-					|| url.searchParams.get('extensionId') === 'vscode.simple-browser'
-					|| url.pathname.includes('simple-browser');
-			} catch {
-				return false;
-			}
-		});
-
-		if (!target) {
-			this.logService.warn(`[browserElements] findWebviewTarget: no target found. browserType=${browserType} targets=${targetInfos.length}`);
-			for (const info of targetInfos) {
-				try {
-					const type = info.type ?? 'unknown';
-					this.logService.warn(`[browserElements] target id=${info.targetId} type=${type} url=${info.url}`);
-				} catch (e) {
-					this.logService.warn(`[browserElements] target (failed to read): ${e}`);
+		if (locator.browserViewId) {
+			const webContentsInstance = this.browserViewMainService.tryGetBrowserView(locator.browserViewId)?.webContents;
+			const target = targetInfos.find((targetInfo: { targetId: string; type: string }) => {
+				if (targetInfo.type !== 'page') {
+					return false;
 				}
-			}
-			return undefined;
+
+				return webContents.fromDevToolsTargetId(targetInfo.targetId) === webContentsInstance;
+			});
+			return target?.targetId;
 		}
 
-		return target.targetId;
+		return undefined;
 	}
 
-	async waitForWebviewTargets(debuggers: Electron.Debugger, windowId: number, browserType: BrowserType): Promise<string | undefined> {
+	async waitForWebviewTargets(debuggers: Electron.Debugger, locator: IBrowserTargetLocator): Promise<string | undefined> {
 		const start = Date.now();
 		const timeout = 10000;
 
 		while (Date.now() - start < timeout) {
-			const targetId = await this.findWebviewTarget(debuggers, windowId, browserType);
+			const targetId = await this.findWebviewTarget(debuggers, locator);
 			if (targetId) {
 				return targetId;
 			}
@@ -274,25 +114,27 @@ export class NativeBrowserElementsMainService extends Disposable implements INat
 		return undefined;
 	}
 
-	async startDebugSession(windowId: number | undefined, token: CancellationToken, browserType: BrowserType, cancelAndDetachId?: number): Promise<void> {
+	async startDebugSession(windowId: number | undefined, token: CancellationToken, locator: IBrowserTargetLocator, cancelAndDetachId?: number): Promise<void> {
 		const window = this.windowById(windowId);
 		if (!window?.win) {
 			return undefined;
 		}
 
-		const hostedWebview = this.findHostWebviewContents(window.win, browserType);
+		// Find the simple browser webview
+		const allWebContents = webContents.getAllWebContents();
+		const simpleBrowserWebview = allWebContents.find(webContent => webContent.id === window.id);
 
-		if (!hostedWebview) {
+		if (!simpleBrowserWebview) {
 			return undefined;
 		}
 
-		const debuggers = hostedWebview.debugger;
+		const debuggers = simpleBrowserWebview.debugger;
 		if (!debuggers.isAttached()) {
 			debuggers.attach();
 		}
 
 		try {
-			const matchingTargetId = await this.waitForWebviewTargets(debuggers, windowId!, browserType);
+			const matchingTargetId = await this.waitForWebviewTargets(debuggers, locator);
 			if (!matchingTargetId) {
 				if (debuggers.isAttached()) {
 					debuggers.detach();
@@ -337,65 +179,30 @@ export class NativeBrowserElementsMainService extends Disposable implements INat
 		}
 	}
 
-	async getElementData(windowId: number | undefined, rect: IRectangle, token: CancellationToken, browserType: BrowserType, cancellationId?: number): Promise<IElementData | undefined> {
+	async getElementData(windowId: number | undefined, rect: IRectangle, token: CancellationToken, locator: IBrowserTargetLocator, cancellationId?: number): Promise<IElementData | undefined> {
 		const window = this.windowById(windowId);
 		if (!window?.win) {
 			return undefined;
 		}
 
-		const hostedWebview = this.findHostWebviewContents(window.win, browserType);
+		// Find the simple browser webview
+		const allWebContents = webContents.getAllWebContents();
+		const simpleBrowserWebview = allWebContents.find(webContent => webContent.id === window.id);
 
-		if (!hostedWebview) {
+		if (!simpleBrowserWebview) {
 			return undefined;
 		}
 
-		const debuggers = hostedWebview.debugger;
+		const debuggers = simpleBrowserWebview.debugger;
 		if (!debuggers.isAttached()) {
 			debuggers.attach();
 		}
 
 		let targetSessionId: string | undefined = undefined;
-		let iframeOffset: IRectangle | undefined;
-		let shouldApplyIFrameOffset = false;
 		try {
-			let targetId = await this.findWebviewTarget(debuggers, windowId!, browserType);
-			if (!targetId) {
-				throw new Error('No target found');
-			}
-
-			// For Simple Browser, attempt to attach to both outer + content targets so we can
-			// accurately translate element bounds from iframe coordinates into the webview.
-			if (browserType === BrowserType.SimpleBrowser) {
-				const { outerTargetId, contentTargetId } = await this.getSimpleBrowserTargets(debuggers);
-				shouldApplyIFrameOffset = Boolean(contentTargetId);
-				if (outerTargetId) {
-					const { sessionId: outerSessionId } = await debuggers.sendCommand('Target.attachToTarget', {
-						targetId: outerTargetId,
-						flatten: true,
-					});
-
-					try {
-						await debuggers.sendCommand('Runtime.enable', {}, outerSessionId);
-						const iframe = await this.getTopLevelIFrameInfo(debuggers, outerSessionId);
-						if (iframe && iframe.width > 0 && iframe.height > 0) {
-							iframeOffset = { x: iframe.x, y: iframe.y, width: iframe.width, height: iframe.height };
-						}
-					} finally {
-						try {
-							await debuggers.sendCommand('Target.detachFromTarget', { sessionId: outerSessionId }, undefined);
-						} catch {
-							// ignore
-						}
-					}
-				}
-
-				if (contentTargetId) {
-					targetId = contentTargetId;
-				}
-			}
-
+			const targetId = await this.findWebviewTarget(debuggers, locator);
 			const { sessionId } = await debuggers.sendCommand('Target.attachToTarget', {
-				targetId,
+				targetId: targetId,
 				flatten: true,
 			});
 
@@ -443,6 +250,36 @@ export class NativeBrowserElementsMainService extends Disposable implements INat
 						rowLineDash: true,
 						columnLineDash: true
 					},
+					flexContainerHighlightConfig: {
+						containerBorder: {
+							color: { r: 120, g: 180, b: 255 },
+							pattern: 'solid'
+						},
+						itemSeparator: {
+							color: { r: 140, g: 190, b: 255 },
+							pattern: 'solid'
+						},
+						lineSeparator: {
+							color: { r: 140, g: 190, b: 255 },
+							pattern: 'solid'
+						},
+						mainDistributedSpace: {
+							hatchColor: { r: 140, g: 190, b: 255, a: 0.7 },
+							fillColor: { r: 140, g: 190, b: 255, a: 0.4 }
+						},
+						crossDistributedSpace: {
+							hatchColor: { r: 140, g: 190, b: 255, a: 0.7 },
+							fillColor: { r: 140, g: 190, b: 255, a: 0.4 }
+						},
+						rowGapSpace: {
+							hatchColor: { r: 140, g: 190, b: 255, a: 0.7 },
+							fillColor: { r: 140, g: 190, b: 255, a: 0.4 }
+						},
+						columnGapSpace: {
+							hatchColor: { r: 140, g: 190, b: 255, a: 0.7 },
+							fillColor: { r: 140, g: 190, b: 255, a: 0.4 }
+						}
+					},
 					flexItemHighlightConfig: {
 						baseSizeBox: {
 							hatchColor: { r: 130, g: 170, b: 255, a: 0.6 }
@@ -470,12 +307,10 @@ export class NativeBrowserElementsMainService extends Disposable implements INat
 		const nodeData = await this.getNodeData(targetSessionId, debuggers, window.win, cancellationId);
 		await this.finishOverlay(debuggers, targetSessionId);
 
-		const zoomFactor = hostedWebview.getZoomFactor();
-		const offsetX = shouldApplyIFrameOffset ? (iframeOffset?.x ?? 0) : 0;
-		const offsetY = shouldApplyIFrameOffset ? (iframeOffset?.y ?? 0) : 0;
+		const zoomFactor = simpleBrowserWebview.getZoomFactor();
 		const absoluteBounds = {
-			x: rect.x + offsetX + nodeData.bounds.x,
-			y: rect.y + offsetY + nodeData.bounds.y,
+			x: rect.x + nodeData.bounds.x,
+			y: rect.y + nodeData.bounds.y,
 			width: nodeData.bounds.width,
 			height: nodeData.bounds.height
 		};
@@ -495,6 +330,306 @@ export class NativeBrowserElementsMainService extends Disposable implements INat
 		};
 
 		return { outerHTML: nodeData.outerHTML, computedStyle: nodeData.computedStyle, bounds: scaledBounds };
+	}
+
+	private findHostWebviewContents(window: BrowserWindow, browserType: BrowserType): Electron.WebContents | undefined {
+		const allWebContents = webContents.getAllWebContents();
+		const hostId = window.webContents.id;
+
+		const matchesBrowserType = (url: string) => {
+			if (browserType === BrowserType.SimpleBrowser) {
+				return url.includes('simple-browser');
+			}
+			if (browserType === BrowserType.LiveServer) {
+				return url.includes('browser-preview') || url.includes('live-server');
+			}
+			return false;
+		};
+
+		let hostedWebview = allWebContents.find(webContent => {
+			try {
+				return webContent.getType?.() === 'webview'
+					&& webContent.hostWebContents?.id === hostId
+					&& matchesBrowserType(webContent.getURL());
+			} catch {
+				return false;
+			}
+		});
+
+		// Fallback to old heuristic (in case hostWebContents is not set as expected)
+		if (!hostedWebview) {
+			hostedWebview = allWebContents.find(webContent => {
+				try {
+					return webContent.getType?.() === 'webview' && matchesBrowserType(webContent.getURL());
+				} catch {
+					return false;
+				}
+			});
+		}
+
+		return hostedWebview;
+	}
+
+	private tryParseUrl(value: string): URL | undefined {
+		try {
+			return new URL(value);
+		} catch {
+			return undefined;
+		}
+	}
+
+	private findTargetIdForBrowserType(targetInfos: Array<{ targetId: string; url: string; type?: string }>, browserType: BrowserType, windowId: number): string | undefined {
+		if (browserType === BrowserType.SimpleBrowser) {
+			const candidates: Array<{ targetId: string; reqId?: number }> = [];
+			for (const info of targetInfos) {
+				const url = this.tryParseUrl(info.url);
+				if (!url) {
+					continue;
+				}
+				if (url.searchParams.get('extensionId') !== 'vscode.simple-browser') {
+					continue;
+				}
+				if (!url.searchParams.has('vscodeBrowserReqId')) {
+					continue;
+				}
+				const reqIdRaw = url.searchParams.get('vscodeBrowserReqId');
+				const reqId = reqIdRaw ? Number(reqIdRaw) : undefined;
+				candidates.push({ targetId: info.targetId, reqId: Number.isFinite(reqId) ? reqId : undefined });
+			}
+
+			candidates.sort((a, b) => (b.reqId ?? 0) - (a.reqId ?? 0));
+			return candidates[0]?.targetId;
+		}
+
+		if (browserType === BrowserType.LiveServer) {
+			for (const info of targetInfos) {
+				const url = this.tryParseUrl(info.url);
+				if (!url) {
+					continue;
+				}
+				if (url.searchParams.get('extensionId') === 'ms-vscode.live-server' && url.searchParams.get('id')) {
+					return info.targetId;
+				}
+				if (url.pathname.includes('browser-preview') || url.pathname.includes('live-server')) {
+					return info.targetId;
+				}
+			}
+		}
+
+		// last resort: try to find anything that looks like a content page
+		return targetInfos.find(t => t.type === 'page')?.targetId;
+	}
+
+	async getConsoleLogs(windowId: number | undefined, token: CancellationToken, browserType: BrowserType, durationMs: number = 3000): Promise<IConsoleLogsResult> {
+		const window = this.windowById(windowId);
+		if (!window?.win) {
+			return { success: false, url: '', logs: [], error: 'Window not found' };
+		}
+
+		const hostedWebview = this.findHostWebviewContents(window.win, browserType);
+		if (!hostedWebview) {
+			return { success: false, url: '', logs: [], error: 'Browser webview not found' };
+		}
+
+		const debuggers = hostedWebview.debugger;
+		const wasAttached = debuggers.isAttached();
+		if (!wasAttached) {
+			debuggers.attach();
+		}
+
+		let sessionId: string | undefined;
+		let targetUrl = '';
+		const logs: IConsoleLogEntry[] = [];
+		try {
+			const { targetInfos } = await debuggers.sendCommand('Target.getTargets') as unknown as { targetInfos: Array<{ targetId: string; url: string; type?: string }> };
+			const targetId = this.findTargetIdForBrowserType(targetInfos, browserType, windowId ?? 0);
+			if (!targetId) {
+				return { success: false, url: '', logs: [], error: 'Could not find browser target' };
+			}
+
+			const attachResult = await debuggers.sendCommand('Target.attachToTarget', { targetId, flatten: true });
+			sessionId = (attachResult as { sessionId: string }).sessionId;
+
+			await debuggers.sendCommand('Runtime.enable', {}, sessionId);
+			await debuggers.sendCommand('Log.enable', {}, sessionId);
+
+			const { result } = await debuggers.sendCommand('Runtime.evaluate', { expression: 'window.location.href', returnByValue: true }, sessionId) as unknown as { result: { value?: string } };
+			targetUrl = result?.value ?? '';
+
+			type IConsoleMessageParams = {
+				type?: string;
+				args?: Array<{ type: string; value?: unknown; description?: string }>;
+				timestamp?: number;
+				stackTrace?: { callFrames?: Array<{ url: string; lineNumber: number; columnNumber: number }> };
+				entry?: {
+					level?: string;
+					text?: string;
+					timestamp?: number;
+					url?: string;
+					lineNumber?: number;
+					stackTrace?: { callFrames?: Array<{ url: string; lineNumber: number; columnNumber: number }> };
+				};
+			};
+
+			const onMessage = (event: Electron.Event, method: string, params: IConsoleMessageParams, messageSessionId?: string) => {
+				if (messageSessionId !== sessionId) {
+					return;
+				}
+
+				if (method === 'Runtime.consoleAPICalled') {
+					const type = this.mapConsoleType(String(params.type ?? 'log'));
+					const message = this.formatConsoleArgs(Array.isArray(params.args) ? params.args : []);
+					const stackTrace = params.stackTrace?.callFrames?.[0];
+					logs.push({
+						type,
+						timestamp: typeof params.timestamp === 'number' ? params.timestamp * 1000 : Date.now(),
+						message,
+						url: stackTrace?.url,
+						lineNumber: stackTrace?.lineNumber,
+						columnNumber: stackTrace?.columnNumber,
+						stackTrace: params.stackTrace?.callFrames?.map(f => `  at ${f.url}:${f.lineNumber}:${f.columnNumber}`).join('\n'),
+					});
+					return;
+				}
+
+				if (method === 'Log.entryAdded') {
+					const entry = params.entry;
+					if (entry) {
+						logs.push({
+							type: this.mapLogLevel(String(entry.level ?? 'log')),
+							timestamp: typeof entry.timestamp === 'number' ? entry.timestamp * 1000 : Date.now(),
+							message: String(entry.text ?? ''),
+							url: entry.url,
+							lineNumber: entry.lineNumber,
+							stackTrace: entry.stackTrace?.callFrames?.map(f => `  at ${f.url}:${f.lineNumber}:${f.columnNumber}`).join('\n'),
+						});
+					}
+				}
+			};
+
+			debuggers.on('message', onMessage);
+			try {
+				await new Promise<void>(resolve => {
+					const timeoutHandle = setTimeout(resolve, durationMs);
+					const disposable = token.onCancellationRequested(() => {
+						clearTimeout(timeoutHandle);
+						disposable.dispose();
+						resolve();
+					});
+				});
+			} finally {
+				debuggers.off('message', onMessage);
+			}
+
+			return { success: true, url: targetUrl, logs: logs.sort((a, b) => a.timestamp - b.timestamp) };
+		} catch (error) {
+			this.logService.error('[browserElements] getConsoleLogs: error', error);
+			return { success: false, url: targetUrl, logs: [], error: String(error) };
+		} finally {
+			try {
+				if (sessionId) {
+					await debuggers.sendCommand('Target.detachFromTarget', { sessionId });
+				}
+			} catch {
+				// ignore
+			}
+			if (!wasAttached && debuggers.isAttached()) {
+				debuggers.detach();
+			}
+		}
+	}
+
+	async getCurrentUrl(windowId: number | undefined, token: CancellationToken, browserType: BrowserType): Promise<ICurrentUrlResult> {
+		const window = this.windowById(windowId);
+		if (!window?.win) {
+			return { success: false, url: '', error: 'Window not found' };
+		}
+
+		const hostedWebview = this.findHostWebviewContents(window.win, browserType);
+		if (!hostedWebview) {
+			return { success: false, url: '', error: 'Browser webview not found' };
+		}
+
+		const debuggers = hostedWebview.debugger;
+		const wasAttached = debuggers.isAttached();
+		if (!wasAttached) {
+			debuggers.attach();
+		}
+
+		let sessionId: string | undefined;
+		try {
+			const { targetInfos } = await debuggers.sendCommand('Target.getTargets') as unknown as { targetInfos: Array<{ targetId: string; url: string; type?: string }> };
+			const targetId = this.findTargetIdForBrowserType(targetInfos, browserType, windowId ?? 0);
+			if (!targetId) {
+				return { success: false, url: '', error: 'Could not find browser target' };
+			}
+
+			const attachResult = await debuggers.sendCommand('Target.attachToTarget', { targetId, flatten: true });
+			sessionId = (attachResult as { sessionId: string }).sessionId;
+			await debuggers.sendCommand('Runtime.enable', {}, sessionId);
+			const { result } = await debuggers.sendCommand('Runtime.evaluate', { expression: 'window.location.href', returnByValue: true }, sessionId) as unknown as { result: { value?: string } };
+			return { success: true, url: result?.value ?? '' };
+		} catch (error) {
+			this.logService.error('[browserElements] getCurrentUrl: error', error);
+			return { success: false, url: '', error: String(error) };
+		} finally {
+			try {
+				if (sessionId) {
+					await debuggers.sendCommand('Target.detachFromTarget', { sessionId });
+				}
+			} catch {
+				// ignore
+			}
+			if (!wasAttached && debuggers.isAttached()) {
+				debuggers.detach();
+			}
+		}
+	}
+
+	private mapConsoleType(type: string): 'log' | 'info' | 'warn' | 'error' | 'debug' {
+		switch (type) {
+			case 'warning':
+				return 'warn';
+			case 'error':
+				return 'error';
+			case 'info':
+				return 'info';
+			case 'debug':
+				return 'debug';
+			default:
+				return 'log';
+		}
+	}
+
+	private mapLogLevel(level: string): 'log' | 'info' | 'warn' | 'error' | 'debug' {
+		switch (level) {
+			case 'warning':
+				return 'warn';
+			case 'error':
+				return 'error';
+			case 'info':
+				return 'info';
+			case 'verbose':
+				return 'debug';
+			default:
+				return 'log';
+		}
+	}
+
+	private formatConsoleArgs(args: Array<{ type: string; value?: unknown; description?: string }>): string {
+		return args.map(arg => {
+			if (arg.value !== undefined) {
+				if (typeof arg.value === 'object') {
+					try {
+						return JSON.stringify(arg.value);
+					} catch {
+						return String(arg.value);
+					}
+				}
+				return String(arg.value);
+			}
+			return arg.description || `[${arg.type}]`;
+		}).join(' ');
 	}
 
 	async getNodeData(sessionId: string, debuggers: Electron.Debugger, window: BrowserWindow, cancellationId?: number): Promise<NodeDataResponse> {
@@ -573,285 +708,7 @@ export class NativeBrowserElementsMainService extends Disposable implements INat
 		});
 	}
 
-	async getConsoleLogs(windowId: number | undefined, token: CancellationToken, browserType: BrowserType, durationMs: number = 3000): Promise<IConsoleLogsResult> {
-		this.logService.info(`[browserElements] consoleLogs: invoked windowId=${windowId} browserType=${browserType}`);
-		const window = this.windowById(windowId);
-		if (!window?.win) {
-			this.logService.warn(`[browserElements] consoleLogs: window not found for id ${windowId}`);
-			return { success: false, url: '', logs: [], error: 'Window not found' };
-		}
-		const windowWin = window.win;
-		if (!windowWin) {
-			this.logService.warn(`[browserElements] consoleLogs: BrowserWindow missing for id ${windowId}`);
-			return { success: false, url: '', logs: [], error: 'Window not found' };
-		}
-
-		// Locate the simple-browser webview webContents hosted by this window
-		const allWebContents = webContents.getAllWebContents();
-		const simpleBrowserWebview = allWebContents.find(webContent => {
-			try {
-				return webContent.getType?.() === 'webview'
-					&& webContent.getURL().includes('simple-browser');
-			} catch (e) {
-				return false;
-			}
-		});
-
-		if (!simpleBrowserWebview) {
-			this.logService.warn(`[browserElements] consoleLogs: simple-browser webview not found. host=${windowWin.webContents.id}, candidates=${allWebContents.length}`);
-			for (const wc of allWebContents) {
-				try {
-					this.logService.warn(`[browserElements] candidate id=${wc.id} type=${wc.getType?.()} host=${wc.hostWebContents?.id} url=${wc.getURL?.()}`);
-				} catch (e) {
-					this.logService.warn(`[browserElements] candidate id=${wc.id} (failed to read url/type): ${e}`);
-				}
-			}
-			return { success: false, url: '', logs: [], error: 'Simple browser webview not found' };
-		}
-
-		this.logService.info(`[browserElements] consoleLogs: found webview id=${simpleBrowserWebview.id} host=${simpleBrowserWebview.hostWebContents?.id} url=${simpleBrowserWebview.getURL()}`);
-
-		const debuggers = simpleBrowserWebview.debugger;
-		if (!debuggers.isAttached()) {
-			debuggers.attach();
-		}
-
-		let targetSessionId: string | undefined;
-		let targetUrl: string = '';
-
-		try {
-			const targetId = await this.findWebviewTarget(debuggers, windowId!, browserType);
-			if (!targetId) {
-				this.logService.warn('[browserElements] consoleLogs: could not find webview target for CDP attach');
-				debuggers.detach();
-				return { success: false, url: '', logs: [], error: 'Could not find browser target' };
-			}
-
-			const { sessionId } = await debuggers.sendCommand('Target.attachToTarget', {
-				targetId: targetId,
-				flatten: true,
-			});
-
-			targetSessionId = sessionId;
-
-			// Enable Runtime to get console messages
-			await debuggers.sendCommand('Runtime.enable', {}, sessionId);
-			await debuggers.sendCommand('Log.enable', {}, sessionId);
-
-			// Get the current URL
-			const { result: urlResult } = await debuggers.sendCommand('Runtime.evaluate', {
-				expression: 'window.location.href',
-				returnByValue: true,
-			}, sessionId);
-			targetUrl = urlResult?.value || '';
-
-			// Collect console logs for the specified duration
-			const logs: IConsoleLogEntry[] = [];
-
-			const onMessage = (event: Electron.Event, method: string, params: {
-				type?: string;
-				args?: Array<{ type: string; value?: unknown; description?: string }>;
-				timestamp?: number;
-				stackTrace?: { callFrames: Array<{ url: string; lineNumber: number; columnNumber: number }> };
-				entry?: { level: string; text: string; timestamp: number; url?: string; lineNumber?: number; stackTrace?: { callFrames: Array<{ url: string; lineNumber: number; columnNumber: number }> } };
-			}, targetId?: string) => {
-				if (targetId !== targetSessionId) {
-					return;
-				}
-
-				if (method === 'Runtime.consoleAPICalled') {
-					const type = this.mapConsoleType(params.type || 'log');
-					const message = this.formatConsoleArgs(params.args || []);
-					const stackTrace = params.stackTrace?.callFrames?.[0];
-
-					logs.push({
-						type,
-						timestamp: params.timestamp ? params.timestamp * 1000 : Date.now(),
-						message,
-						url: stackTrace?.url,
-						lineNumber: stackTrace?.lineNumber,
-						columnNumber: stackTrace?.columnNumber,
-						stackTrace: params.stackTrace?.callFrames?.map(f => `  at ${f.url}:${f.lineNumber}:${f.columnNumber}`).join('\n'),
-					});
-				} else if (method === 'Log.entryAdded') {
-					const entry = params.entry;
-					if (entry) {
-						logs.push({
-							type: this.mapLogLevel(entry.level),
-							timestamp: entry.timestamp * 1000,
-							message: entry.text,
-							url: entry.url,
-							lineNumber: entry.lineNumber,
-							stackTrace: entry.stackTrace?.callFrames?.map(f => `  at ${f.url}:${f.lineNumber}:${f.columnNumber}`).join('\n'),
-						});
-					}
-				}
-			};
-
-			debuggers.on('message', onMessage);
-
-			// Wait for the specified duration to collect logs
-			await new Promise<void>((resolve) => {
-				const timeoutId = setTimeout(() => {
-					resolve();
-				}, durationMs);
-
-				if (token.isCancellationRequested) {
-					clearTimeout(timeoutId);
-					resolve();
-				}
-
-				token.onCancellationRequested(() => {
-					clearTimeout(timeoutId);
-					resolve();
-				});
-			});
-
-			debuggers.off('message', onMessage);
-
-			// Detach from target
-			await debuggers.sendCommand('Target.detachFromTarget', { sessionId }, undefined);
-			debuggers.detach();
-
-			return {
-				success: true,
-				url: targetUrl,
-				logs: logs.sort((a, b) => a.timestamp - b.timestamp),
-			};
-
-		} catch (error) {
-			if (debuggers.isAttached()) {
-				debuggers.detach();
-			}
-			this.logService.error(`[browserElements] consoleLogs: error during capture`, error);
-			return { success: false, url: targetUrl, logs: [], error: String(error) };
-		}
-	}
-
-	async getCurrentUrl(windowId: number | undefined, token: CancellationToken, browserType: BrowserType): Promise<ICurrentUrlResult> {
-		this.logService.trace(`[browserElements] currentUrl: invoked windowId=${windowId} browserType=${browserType}`);
-		if (typeof windowId !== 'number') {
-			return { success: false, url: '', error: 'Window not found' };
-		}
-		const window = this.windowById(windowId);
-		if (!window?.win) {
-			return { success: false, url: '', error: 'Window not found' };
-		}
-		const windowWin = window.win;
-		if (!windowWin) {
-			return { success: false, url: '', error: 'Window not found' };
-		}
-
-		const allWebContents = webContents.getAllWebContents();
-		let simpleBrowserWebview = allWebContents.find(webContent => {
-			try {
-				return webContent.getType?.() === 'webview'
-					&& webContent.hostWebContents?.id === windowWin.webContents.id
-					&& webContent.getURL().includes('simple-browser');
-			} catch {
-				return false;
-			}
-		});
-
-		// Fallback to old heuristic (in case hostWebContents is not set as expected)
-		if (!simpleBrowserWebview) {
-			simpleBrowserWebview = allWebContents.find(webContent => {
-				try {
-					return webContent.getType?.() === 'webview'
-						&& webContent.getURL().includes('simple-browser');
-				} catch {
-					return false;
-				}
-			});
-		}
-
-		if (!simpleBrowserWebview) {
-			return { success: false, url: '', error: 'Simple browser webview not found' };
-		}
-
-		const debuggers = simpleBrowserWebview.debugger;
-		const wasAttached = debuggers.isAttached();
-		if (!wasAttached) {
-			debuggers.attach();
-		}
-
-		let targetUrl = '';
-		let sessionId: string | undefined;
-		try {
-			const targetId = await this.findWebviewTarget(debuggers, windowId, browserType);
-			if (!targetId) {
-				return { success: false, url: '', error: 'Could not find browser target' };
-			}
-
-			const attachResult = await debuggers.sendCommand('Target.attachToTarget', {
-				targetId,
-				flatten: true,
-			});
-			sessionId = attachResult.sessionId;
-
-			await debuggers.sendCommand('Runtime.enable', {}, sessionId);
-			const { result } = await debuggers.sendCommand('Runtime.evaluate', {
-				expression: 'window.location.href',
-				returnByValue: true,
-			}, sessionId);
-			targetUrl = result?.value || '';
-
-			await debuggers.sendCommand('Target.detachFromTarget', { sessionId }, undefined);
-			return { success: true, url: targetUrl };
-		} catch (error) {
-			this.logService.error('[browserElements] currentUrl: error', error);
-			return { success: false, url: targetUrl, error: String(error) };
-		} finally {
-			try {
-				if (sessionId) {
-					await debuggers.sendCommand('Target.detachFromTarget', { sessionId }, undefined);
-				}
-			} catch {
-				// ignore
-			}
-			if (!wasAttached && debuggers.isAttached()) {
-				debuggers.detach();
-			}
-		}
-	}
-
-	private mapConsoleType(type: string): 'log' | 'info' | 'warn' | 'error' | 'debug' {
-		switch (type) {
-			case 'warning': return 'warn';
-			case 'error': return 'error';
-			case 'info': return 'info';
-			case 'debug': return 'debug';
-			default: return 'log';
-		}
-	}
-
-	private mapLogLevel(level: string): 'log' | 'info' | 'warn' | 'error' | 'debug' {
-		switch (level) {
-			case 'warning': return 'warn';
-			case 'error': return 'error';
-			case 'info': return 'info';
-			case 'verbose': return 'debug';
-			default: return 'log';
-		}
-	}
-
-	private formatConsoleArgs(args: Array<{ type: string; value?: unknown; description?: string }>): string {
-		return args.map(arg => {
-			if (arg.value !== undefined) {
-				if (typeof arg.value === 'object') {
-					try {
-						return JSON.stringify(arg.value);
-					} catch {
-						return String(arg.value);
-					}
-				}
-				return String(arg.value);
-			}
-			return arg.description || `[${arg.type}]`;
-		}).join(' ');
-	}
-
-	formatMatchedStyles(matched: { inlineStyle?: { cssProperties?: Array<{ name: string; value: string }> }; matchedCSSRules?: Array<{ rule: { selectorList: { selectors: Array<{ text: string }> }; origin: string; style: { cssProperties: Array<{ name: string; value: string }> } } }>; inherited?: Array<{ matchedCSSRules?: Array<{ rule: { selectorList: { selectors: Array<{ text: string }> }; origin: string; style: { cssProperties: Array<{ name: string; value: string }> } } }> }> }): string {
+	formatMatchedStyles(matched: { inlineStyle?: { cssProperties?: Array<{ name: string; value: string }> }; matchedCSSRules?: Array<{ rule: { selectorList: { selectors: Array<{ text: string }> }; origin: string; style: { cssProperties: Array<{ name: string; value: string }> } } }>; inherited?: Array<{ inlineStyle?: { cssText: string }; matchedCSSRules?: Array<{ rule: { selectorList: { selectors: Array<{ text: string }> }; origin: string; style: { cssProperties: Array<{ name: string; value: string }> } } }> }> }): string {
 		const lines: string[] = [];
 
 		// inline
@@ -886,6 +743,14 @@ export class NativeBrowserElementsMainService extends Disposable implements INat
 		if (matched.inherited?.length) {
 			let level = 1;
 			for (const inherited of matched.inherited) {
+				const inline = inherited.inlineStyle;
+				if (inline) {
+					lines.push(`/* Inherited from ancestor level ${level} (inline) */`);
+					lines.push('element {');
+					lines.push(inline.cssText);
+					lines.push('}\n');
+				}
+
 				const rules = inherited.matchedCSSRules || [];
 				for (const ruleEntry of rules) {
 					const rule = ruleEntry.rule;

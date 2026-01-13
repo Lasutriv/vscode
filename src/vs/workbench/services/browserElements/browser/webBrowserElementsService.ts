@@ -3,22 +3,22 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { BrowserType, IConsoleLogsResult, ICurrentUrlResult, IElementData } from '../../../../platform/browserElements/common/browserElements.js';
+import { BrowserType, IConsoleLogsResult, ICurrentUrlResult, IElementData, IBrowserTargetLocator } from '../../../../platform/browserElements/common/browserElements.js';
 import { IRectangle } from '../../../../platform/window/common/window.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { registerSingleton, InstantiationType } from '../../../../platform/instantiation/common/extensions.js';
 import { IBrowserElementsService } from './browserElementsService.js';
 
 class WebBrowserElementsService implements IBrowserElementsService {
-	declare readonly _serviceBrand: undefined;
+	_serviceBrand: undefined;
 
 	constructor() { }
 
-	async getElementData(rect: IRectangle, token: CancellationToken): Promise<IElementData | undefined> {
+	async getElementData(rect: IRectangle, token: CancellationToken, locator: IBrowserTargetLocator | undefined): Promise<IElementData | undefined> {
 		throw new Error('Not implemented');
 	}
 
-	startDebugSession(token: CancellationToken, browserType: BrowserType): Promise<void> {
+	async startDebugSession(token: CancellationToken, locator: IBrowserTargetLocator): Promise<void> {
 		throw new Error('Not implemented');
 	}
 

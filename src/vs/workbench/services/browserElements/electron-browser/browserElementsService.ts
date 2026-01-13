@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { BrowserType, IConsoleLogsResult, ICurrentUrlResult, IElementData, INativeBrowserElementsService } from '../../../../platform/browserElements/common/browserElements.js';
+import { BrowserType, IConsoleLogsResult, ICurrentUrlResult, IElementData, INativeBrowserElementsService, IBrowserTargetLocator } from '../../../../platform/browserElements/common/browserElements.js';
 import { IRectangle } from '../../../../platform/window/common/window.js';
 import { ipcRenderer } from '../../../../base/parts/sandbox/electron-browser/globals.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
@@ -12,8 +12,6 @@ import { IBrowserElementsService } from '../browser/browserElementsService.js';
 import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
 import { INativeWorkbenchEnvironmentService } from '../../environment/electron-browser/environmentService.js';
 import { NativeBrowserElementsService } from '../../../../platform/browserElements/common/nativeBrowserElementsService.js';
-import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
-import type { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 
 class WorkbenchNativeBrowserElementsService extends NativeBrowserElementsService {
 
@@ -37,7 +35,7 @@ class WorkbenchBrowserElementsService implements IBrowserElementsService {
 		@INativeBrowserElementsService private readonly simpleBrowser: INativeBrowserElementsService
 	) { }
 
-	async startDebugSession(token: CancellationToken, browserType: BrowserType): Promise<void> {
+	async startDebugSession(token: CancellationToken, locator: IBrowserTargetLocator): Promise<void> {
 		const cancelAndDetachId = cancelAndDetachIdPool++;
 		const onCancelChannel = `vscode:cancelCurrentSession${cancelAndDetachId}`;
 
@@ -46,15 +44,15 @@ class WorkbenchBrowserElementsService implements IBrowserElementsService {
 			disposable.dispose();
 		});
 		try {
-			await this.simpleBrowser.startDebugSession(token, browserType, cancelAndDetachId);
+			await this.simpleBrowser.startDebugSession(token, locator, cancelAndDetachId);
 		} catch (error) {
 			disposable.dispose();
 			throw new Error('No debug session target found', error);
 		}
 	}
 
-	async getElementData(rect: IRectangle, token: CancellationToken, browserType: BrowserType | undefined): Promise<IElementData | undefined> {
-		if (!browserType) {
+	async getElementData(rect: IRectangle, token: CancellationToken, locator: IBrowserTargetLocator | undefined): Promise<IElementData | undefined> {
+		if (!locator) {
 			return undefined;
 		}
 		const cancelSelectionId = cancelSelectionIdPool++;
@@ -63,7 +61,7 @@ class WorkbenchBrowserElementsService implements IBrowserElementsService {
 			ipcRenderer.send(onCancelChannel, cancelSelectionId);
 		});
 		try {
-			const elementData = await this.simpleBrowser.getElementData(rect, token, browserType, cancelSelectionId);
+			const elementData = await this.simpleBrowser.getElementData(rect, token, locator, cancelSelectionId);
 			return elementData;
 		} catch (error) {
 			disposable.dispose();
@@ -80,8 +78,7 @@ class WorkbenchBrowserElementsService implements IBrowserElementsService {
 			ipcRenderer.send(onCancelChannel, cancelId);
 		});
 		try {
-			const result = await this.simpleBrowser.getConsoleLogs(token, browserType, durationMs);
-			return result;
+			return await this.simpleBrowser.getConsoleLogs(token, browserType, durationMs);
 		} catch (error) {
 			return { success: false, url: '', logs: [], error: String(error) };
 		} finally {
@@ -107,8 +104,3 @@ class WorkbenchBrowserElementsService implements IBrowserElementsService {
 
 registerSingleton(IBrowserElementsService, WorkbenchBrowserElementsService, InstantiationType.Delayed);
 registerSingleton(INativeBrowserElementsService, WorkbenchNativeBrowserElementsService, InstantiationType.Delayed);
-
-CommandsRegistry.registerCommand('simpleBrowser.getCurrentUrl', async (accessor: ServicesAccessor) => {
-	const browserElementsService = accessor.get(IBrowserElementsService);
-	return browserElementsService.getCurrentUrl(CancellationToken.None, BrowserType.SimpleBrowser);
-});
