@@ -14,6 +14,8 @@ declare class URL {
 
 const openApiCommand = 'simpleBrowser.api.open';
 const showCommand = 'simpleBrowser.show';
+const integratedBrowserCommand = 'workbench.action.browser.open';
+const useIntegratedBrowserSetting = 'simpleBrowser.useIntegratedBrowser';
 
 // Toolbar commands
 const screenshotCommand = 'simpleBrowser.screenshotPage';
@@ -43,6 +45,27 @@ const enabledHosts = new Set<string>([
 
 const openerId = 'simpleBrowser.open';
 
+/**
+ * Checks if the integrated browser should be used instead of the simple browser
+ */
+async function shouldUseIntegratedBrowser(): Promise<boolean> {
+	const config = vscode.workspace.getConfiguration();
+	if (!config.get<boolean>(useIntegratedBrowserSetting, false)) {
+		return false;
+	}
+
+	// Verify that the integrated browser command is available
+	const commands = await vscode.commands.getCommands(true);
+	return commands.includes(integratedBrowserCommand);
+}
+
+/**
+ * Opens a URL in the integrated browser
+ */
+async function openInIntegratedBrowser(url?: string): Promise<void> {
+	await vscode.commands.executeCommand(integratedBrowserCommand, url);
+}
+
 export function activate(context: vscode.ExtensionContext) {
 
 	const manager = new SimpleBrowserManager(context.extensionUri);
@@ -55,6 +78,10 @@ export function activate(context: vscode.ExtensionContext) {
 	}));
 
 	context.subscriptions.push(vscode.commands.registerCommand(showCommand, async (url?: string) => {
+		if (await shouldUseIntegratedBrowser()) {
+			return openInIntegratedBrowser(url);
+		}
+
 		if (!url) {
 			url = await vscode.window.showInputBox({
 				placeHolder: vscode.l10n.t("https://example.com"),
@@ -67,11 +94,15 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	}));
 
-	context.subscriptions.push(vscode.commands.registerCommand(openApiCommand, (url: vscode.Uri, showOptions?: {
+	context.subscriptions.push(vscode.commands.registerCommand(openApiCommand, async (url: vscode.Uri, showOptions?: {
 		preserveFocus?: boolean;
 		viewColumn: vscode.ViewColumn;
 	}) => {
-		manager.show(url, showOptions);
+		if (await shouldUseIntegratedBrowser()) {
+			await openInIntegratedBrowser(url.toString(true));
+		} else {
+			manager.show(url, showOptions);
+		}
 	}));
 
 	context.subscriptions.push(vscode.window.registerExternalUriOpener(openerId, {
@@ -86,10 +117,14 @@ export function activate(context: vscode.ExtensionContext) {
 
 			return vscode.ExternalUriOpenerPriority.None;
 		},
-		openExternalUri(resolveUri: vscode.Uri) {
-			return manager.show(resolveUri, {
-				viewColumn: vscode.window.activeTextEditor ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active
-			});
+		async openExternalUri(resolveUri: vscode.Uri) {
+			if (await shouldUseIntegratedBrowser()) {
+				await openInIntegratedBrowser(resolveUri.toString(true));
+			} else {
+				return manager.show(resolveUri, {
+					viewColumn: vscode.window.activeTextEditor ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active
+				});
+			}
 		}
 	}, {
 		schemes: ['http', 'https'],

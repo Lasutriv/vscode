@@ -21,7 +21,7 @@ import { IWorkbenchContribution } from '../../../../common/contributions.js';
 import { Extensions, IExtensionFeaturesRegistry, IExtensionFeatureTableRenderer, IRenderedData, IRowData, ITableData } from '../../../../services/extensionManagement/common/extensionFeatures.js';
 import { isProposedApiEnabled } from '../../../../services/extensions/common/extensions.js';
 import * as extensionsRegistry from '../../../../services/extensions/common/extensionsRegistry.js';
-import { ILanguageModelToolsService, IToolData, ToolDataSource, ToolSet } from '../languageModelToolsService.js';
+import { ILanguageModelToolsService, IToolData, IToolSet, ToolDataSource, ToolSet } from './languageModelToolsService.js';
 import { toolsParametersSchemaSchemaId } from './languageModelToolsParametersSchema.js';
 
 export interface IRawToolContribution {
@@ -78,14 +78,6 @@ const languageModelToolsExtensionPoint = extensionsRegistry.ExtensionsRegistry.r
 					markdownDescription: localize('toolName2', "If {0} is enabled for this tool, the user may use '#' with this name to invoke the tool in a query. Otherwise, the name is not required. Name must not contain whitespace.", '`canBeReferencedInPrompt`'),
 					type: 'string',
 					pattern: '^[\\w-]+$'
-				},
-				legacyToolReferenceFullNames: {
-					markdownDescription: localize('legacyToolReferenceFullNames', "An array of deprecated names for backwards compatibility that can also be used to reference this tool in a query. Each name must not contain whitespace. Full names are generally in the format `toolsetName/toolReferenceName` (e.g., `search/readFile`) or just `toolReferenceName` when there is no toolset (e.g., `readFile`)."),
-					type: 'array',
-					items: {
-						type: 'string',
-						pattern: '^[\\w-]+(/[\\w-]+)?$'
-					}
 				},
 				displayName: {
 					description: localize('toolDisplayName', "A human-readable name for this tool that may be used to describe it in the UI."),
@@ -179,14 +171,6 @@ const languageModelToolSetsExtensionPoint = extensionsRegistry.ExtensionsRegistr
 					type: 'string',
 					pattern: '^[\\w-]+$'
 				},
-				legacyFullNames: {
-					markdownDescription: localize('toolSetLegacyFullNames', "An array of deprecated names for backwards compatibility that can also be used to reference this tool set. Each name must not contain whitespace. Full names are generally in the format `parentToolSetName/toolSetName` (e.g., `github/repo`) or just `toolSetName` when there is no parent toolset (e.g., `repo`)."),
-					type: 'array',
-					items: {
-						type: 'string',
-						pattern: '^[\\w-]+$'
-					}
-				},
 				description: {
 					description: localize('toolSetDescription', "A description of this tool set."),
 					type: 'string'
@@ -212,7 +196,7 @@ function toToolKey(extensionIdentifier: ExtensionIdentifier, toolName: string) {
 	return `${extensionIdentifier.value}/${toolName}`;
 }
 
-function toToolSetKey(extensionIdentifier: ExtensionIdentifier, toolName: string) {
+export function toToolSetKey(extensionIdentifier: ExtensionIdentifier, toolName: string) {
 	return `toolset:${extensionIdentifier.value}/${toolName}`;
 }
 
@@ -342,10 +326,10 @@ export class LanguageModelToolsExtensionPointHandler implements IWorkbenchContri
 					}
 
 					const tools: IToolData[] = [];
-					const toolSets: ToolSet[] = [];
+					const toolSets: IToolSet[] = [];
 
 					for (const toolName of toolSet.tools) {
-						const toolObj = languageModelToolsService.getToolByName(toolName, true);
+						const toolObj = languageModelToolsService.getToolByName(toolName);
 						if (toolObj) {
 							tools.push(toolObj);
 							continue;

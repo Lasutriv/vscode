@@ -55,7 +55,7 @@ import { IChatEntitlementService } from '../../../services/chat/common/chatEntit
 import { APPLICATION_SCOPES, IWorkbenchConfigurationService } from '../../../services/configuration/common/configuration.js';
 import { IEditorGroup, IEditorGroupsService } from '../../../services/editor/common/editorGroupsService.js';
 import { IExtensionService } from '../../../services/extensions/common/extensions.js';
-import { IOpenSettingsOptions, IPreferencesService, ISearchResult, ISetting, ISettingsEditorModel, ISettingsEditorOptions, ISettingsGroup, SettingMatchType, SettingValueType, validateSettingsEditorOptions } from '../../../services/preferences/common/preferences.js';
+import { ALWAYS_SHOW_ADVANCED_SETTINGS_SETTING, IOpenSettingsOptions, IPreferencesService, ISearchResult, ISetting, ISettingsEditorModel, ISettingsEditorOptions, ISettingsGroup, SettingMatchType, SettingValueType, validateSettingsEditorOptions } from '../../../services/preferences/common/preferences.js';
 import { SettingsEditor2Input } from '../../../services/preferences/common/preferencesEditorInput.js';
 import { nullRange, Settings2EditorModel } from '../../../services/preferences/common/preferencesModels.js';
 import { IUserDataProfileService } from '../../../services/userDataProfile/common/userDataProfile.js';
@@ -99,6 +99,7 @@ interface IFocusEventFromScroll extends KeyboardEvent {
 
 const searchBoxLabel = localize('SearchSettings.AriaLabel', "Search settings");
 const SEARCH_TOC_BEHAVIOR_KEY = 'workbench.settings.settingsSearchTocBehavior';
+const SCROLL_BEHAVIOR_KEY = 'workbench.settings.scrollBehavior';
 
 const SHOW_AI_RESULTS_ENABLED_LABEL = localize('showAiResultsEnabled', "Show AI-recommended results");
 const SHOW_AI_RESULTS_DISABLED_LABEL = localize('showAiResultsDisabled', "No AI results available at this time...");
@@ -204,7 +205,7 @@ export class SettingsEditor2 extends EditorPane {
 
 	private settingFastUpdateDelayer: Delayer<void>;
 	private settingSlowUpdateDelayer: Delayer<void>;
-	private pendingSettingUpdate: { key: string; value: any; languageFilter: string | undefined } | null = null;
+	private pendingSettingUpdate: { key: string; value: unknown; languageFilter: string | undefined } | null = null;
 
 	private readonly viewState: ISettingsEditorViewState;
 	private readonly _searchResultModel = this._register(new MutableDisposable<SearchResultModel>());
@@ -299,6 +300,9 @@ export class SettingsEditor2 extends EditorPane {
 				|| e.affectedKeys.has(WorkbenchSettingsEditorSettings.EnableNaturalLanguageSearch)) {
 				this.updateAiSearchToggleVisibility();
 			}
+			if (e.affectsConfiguration(ALWAYS_SHOW_ADVANCED_SETTINGS_SETTING)) {
+				this.onConfigUpdate(undefined, true, true);
+			}
 			if (e.source !== ConfigurationTarget.DEFAULT) {
 				this.onConfigUpdate(e.affectedKeys);
 			}
@@ -352,6 +356,9 @@ export class SettingsEditor2 extends EditorPane {
 	}
 
 	private canShowAdvancedSettings(): boolean {
+		if (this.configurationService.getValue<boolean>(ALWAYS_SHOW_ADVANCED_SETTINGS_SETTING) ?? false) {
+			return true;
+		}
 		return this.viewState.tagFilters?.has(ADVANCED_SETTING_TAG) ?? false;
 	}
 
@@ -744,7 +751,7 @@ export class SettingsEditor2 extends EditorPane {
 						return `@${EXTENSION_SETTING_TAG}${extensionId} `;
 					}).sort();
 					return installedExtensionsTags.filter(extFilter => !query.includes(extFilter));
-				} else if (queryParts[queryParts.length - 1].startsWith('@')) {
+				} else if (query === '' || queryParts[queryParts.length - 1].startsWith('@')) {
 					return SettingsEditor2.SUGGESTIONS.filter(tag => !query.includes(tag)).map(tag => tag.endsWith(':') ? tag : tag + ' ');
 				}
 				return [];
@@ -872,7 +879,7 @@ export class SettingsEditor2 extends EditorPane {
 			// If the target display category is different than the source's, unfocus the category
 			// so that we can render all found settings again.
 			// Then, the reveal call will correctly find the target setting.
-			if (this.viewState.filterToCategory && evt.source.displayCategory !== targetElement.displayCategory) {
+			if (this.viewState.categoryFilter && evt.source.displayCategory !== targetElement.displayCategory) {
 				this.tocTree.setFocus([]);
 			}
 			try {
@@ -1044,17 +1051,64 @@ export class SettingsEditor2 extends EditorPane {
 
 			this.tocFocusedElement = element;
 			this.tocTree.setSelection(element ? [element] : []);
-			if (this.searchResultModel) {
-				if (this.viewState.filterToCategory !== element) {
-					this.viewState.filterToCategory = element ?? undefined;
+			const scrollBehavior = this.configurationService.getValue<'paginated' | 'continuous'>(SCROLL_BEHAVIOR_KEY);
+			if (this.searchResultModel || scrollBehavior === 'paginated') {
+				// In search mode or paginated mode, filter to show only the selected category
+				if (this.viewState.categoryFilter !== element) {
+					this.viewState.categoryFilter = element ?? undefined;
 					// Force render in this case, because
 					// onDidClickSetting relies on the updated view.
 					this.renderTree(undefined, true);
 					this.settingsTree.scrollTop = 0;
 				}
-			} else if (element && (!e.browserEvent || !(<IFocusEventFromScroll>e.browserEvent).fromScroll)) {
-				this.settingsTree.reveal(element, 0);
-				this.settingsTree.setFocus([element]);
+			} else {
+				// In continuous mode, clear any category filter that may have been set in paginated mode
+				if (this.viewState.categoryFilter) {
+					this.viewState.categoryFilter = undefined;
+					this.renderTree(undefined, true);
+				}
+				if (element && (!e.browserEvent || !(<IFocusEventFromScroll>e.browserEvent).fromScroll)) {
+					let targetElement = element;
+					// Searches equivalent old Object currently living in the Tree nodes.
+					if (!this.settingsTree.hasElement(targetElement)) {
+						if (element instanceof SettingsTreeGroupElement) {
+							const targetId = element.id;
+
+							const findInViewNodes = (nodes: any[]): SettingsTreeGroupElement | undefined => {
+								for (const node of nodes) {
+									if (node.element instanceof SettingsTreeGroupElement && node.element.id === targetId) {
+										return node.element;
+									}
+									if (node.children && node.children.length > 0) {
+										const found = findInViewNodes(node.children);
+										if (found) {
+											return found;
+										}
+									}
+								}
+								return undefined;
+							};
+
+							try {
+								const rootNode = this.settingsTree.getNode(null);
+								if (rootNode && rootNode.children) {
+									const foundOldElement = findInViewNodes(rootNode.children);
+									if (foundOldElement) {
+										// Now we don't reveal the New Object, reveal the Old Object"
+										targetElement = foundOldElement;
+									}
+								}
+							} catch (err) {
+								// Tree might be in an invalid state, ignore
+							}
+						}
+					}
+
+					if (this.settingsTree.hasElement(targetElement)) {
+						this.settingsTree.reveal(targetElement, 0);
+						this.settingsTree.setFocus([targetElement]);
+					}
+				}
 			}
 		}));
 
@@ -1184,7 +1238,7 @@ export class SettingsEditor2 extends EditorPane {
 		}));
 	}
 
-	private onDidChangeSetting(key: string, value: any, type: SettingValueType | SettingValueType[], manualReset: boolean, scope: ConfigurationScope | undefined): void {
+	private onDidChangeSetting(key: string, value: unknown, type: SettingValueType | SettingValueType[], manualReset: boolean, scope: ConfigurationScope | undefined): void {
 		const parsedQuery = parseQuery(this.searchWidget.getValue());
 		const languageFilter = parsedQuery.languageFilter;
 		if (manualReset || (this.pendingSettingUpdate && this.pendingSettingUpdate.key !== key)) {
@@ -1202,6 +1256,12 @@ export class SettingsEditor2 extends EditorPane {
 	private updateTreeScrollSync(): void {
 		this.settingRenderers.cancelSuggesters();
 		if (this.searchResultModel) {
+			return;
+		}
+
+		// In paginated mode, we don't sync scroll position since categories are filtered
+		const scrollBehavior = this.configurationService.getValue<'paginated' | 'continuous'>(SCROLL_BEHAVIOR_KEY);
+		if (scrollBehavior === 'paginated') {
 			return;
 		}
 
@@ -1252,7 +1312,7 @@ export class SettingsEditor2 extends EditorPane {
 	}
 
 	private getAncestors(element: SettingsTreeElement): SettingsTreeElement[] {
-		const ancestors: any[] = [];
+		const ancestors: SettingsTreeElement[] = [];
 
 		while (element.parent) {
 			if (element.parent.id !== 'root') {
@@ -1265,7 +1325,7 @@ export class SettingsEditor2 extends EditorPane {
 		return ancestors.reverse();
 	}
 
-	private updateChangedSetting(key: string, value: any, manualReset: boolean, languageFilter: string | undefined, scope: ConfigurationScope | undefined): Promise<void> {
+	private updateChangedSetting(key: string, value: unknown, manualReset: boolean, languageFilter: string | undefined, scope: ConfigurationScope | undefined): Promise<void> {
 		// ConfigurationService displays the error if this fails.
 		// Force a render afterwards because onDidConfigurationUpdate doesn't fire if the update doesn't result in an effective setting value change.
 		const settingsTarget = this.settingsTargetsWidget.settingsTarget;
@@ -1420,7 +1480,7 @@ export class SettingsEditor2 extends EditorPane {
 		this.settingsOrderByTocIndex = this.createSettingsOrderByTocIndex(resolvedSettingsRoot);
 	}
 
-	private async onConfigUpdate(keys?: ReadonlySet<string>, forceRefresh = false, schemaChange = false): Promise<void> {
+	private async onConfigUpdate(keys?: ReadonlySet<string>, forceRefresh = false, triggerSearch = false): Promise<void> {
 		if (keys && this.settingsTreeModel) {
 			return this.updateElementsByKey(keys);
 		}
@@ -1553,7 +1613,7 @@ export class SettingsEditor2 extends EditorPane {
 
 		resolvedSettingsRoot.children!.push(await createTocTreeForExtensionSettings(this.extensionService, extensionSettingsGroups, filter));
 
-		resolvedSettingsRoot.children!.unshift(getCommonlyUsedData(groups, toggleData?.commonlyUsed));
+		resolvedSettingsRoot.children!.unshift(getCommonlyUsedData(groups));
 
 		if (toggleData && setAdditionalGroups) {
 			// Add the additional groups to the model to help with searching.
@@ -1573,16 +1633,64 @@ export class SettingsEditor2 extends EditorPane {
 
 		this.searchResultModel?.updateChildren();
 
+		const firstVisibleElement = this.settingsTree.firstVisibleElement;
+		let anchorId: string | undefined;
+
+		if (firstVisibleElement instanceof SettingsTreeSettingElement) {
+			anchorId = firstVisibleElement.setting.key;
+		} else if (firstVisibleElement instanceof SettingsTreeGroupElement) {
+			anchorId = firstVisibleElement.id;
+		}
+
 		if (this.settingsTreeModel.value) {
 			this.refreshModels(resolvedSettingsRoot);
 
-			if (schemaChange && this.searchResultModel) {
+			if (triggerSearch && this.searchResultModel) {
 				// If an extension's settings were just loaded and a search is active, retrigger the search so it shows up
 				return await this.onSearchInputChanged(false);
 			}
 
 			this.refreshTOCTree();
 			this.renderTree(undefined, forceRefresh);
+
+			if (anchorId) {
+				const newModel = this.settingsTreeModel.value;
+				let newElement: SettingsTreeElement | undefined;
+
+				// eslint-disable-next-line no-restricted-syntax
+				const settings = newModel.getElementsByName(anchorId);
+				if (settings && settings.length > 0) {
+					newElement = settings[0];
+				} else {
+					const findGroup = (roots: SettingsTreeGroupElement[]): SettingsTreeGroupElement | undefined => {
+						for (const g of roots) {
+							if (g.id === anchorId) {
+								return g;
+							}
+							if (g.children) {
+								for (const child of g.children) {
+									if (child instanceof SettingsTreeGroupElement) {
+										const found = findGroup([child]);
+										if (found) {
+											return found;
+										}
+									}
+								}
+							}
+						}
+						return undefined;
+					};
+					newElement = findGroup([newModel.root]);
+				}
+
+				if (newElement) {
+					try {
+						this.settingsTree.reveal(newElement, 0);
+					} catch (e) {
+						// Ignore the error
+					}
+				}
+			}
 		} else {
 			this.settingsTreeModel.value = this.instantiationService.createInstance(SettingsTreeModel, this.viewState, this.workspaceTrustManagementService.isWorkspaceTrusted());
 			this.refreshModels(resolvedSettingsRoot);
@@ -1593,6 +1701,21 @@ export class SettingsEditor2 extends EditorPane {
 				await this.onSearchInputChanged(true);
 			} else {
 				this.refreshTOCTree();
+
+				// In paginated mode, set initial category to the first one (Commonly Used)
+				const scrollBehavior = this.configurationService.getValue<'paginated' | 'continuous'>(SCROLL_BEHAVIOR_KEY);
+				if (scrollBehavior === 'paginated') {
+					const rootChildren = this.settingsTreeModel.value.root.children;
+					if (Array.isArray(rootChildren) && rootChildren.length > 0) {
+						const firstCategory = rootChildren[0];
+						if (firstCategory instanceof SettingsTreeGroupElement) {
+							this.viewState.categoryFilter = firstCategory;
+							this.tocTree.setFocus([firstCategory]);
+							this.tocTree.setSelection([firstCategory]);
+						}
+					}
+				}
+
 				this.refreshTree();
 				this.tocTree.collapseAll();
 			}
@@ -1795,7 +1918,7 @@ export class SettingsEditor2 extends EditorPane {
 
 			if (expandResults) {
 				this.tocTree.setFocus([]);
-				this.viewState.filterToCategory = undefined;
+				this.viewState.categoryFilter = undefined;
 			}
 			this.tocTreeModel.currentSearchModel = this.searchResultModel;
 
@@ -1917,7 +2040,7 @@ export class SettingsEditor2 extends EditorPane {
 		this.tocTreeModel.currentSearchModel = this.searchResultModel;
 		if (expandResults) {
 			this.tocTree.setFocus([]);
-			this.viewState.filterToCategory = undefined;
+			this.viewState.categoryFilter = undefined;
 			this.tocTree.expandAll();
 			this.settingsTree.scrollTop = 0;
 		}

@@ -10,5 +10,6 @@
 	"command.printPage": "Print Page",
 	"command.toggleDevTools": "Toggle DevTools",
 	"command.pageSearch": "Find in Page",
-	"command.captureConsole": "Capture Console Logs"
+	"command.captureConsole": "Capture Console Logs",
+	"configuration.useIntegratedBrowser.description": "When enabled, the `simpleBrowser.show` command will open URLs in the integrated browser instead of the Simple Browser webview. **Note:** This setting is experimental and only available on desktop."
 }

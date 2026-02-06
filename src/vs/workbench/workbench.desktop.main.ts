@@ -91,6 +91,7 @@ import './services/auxiliaryWindow/electron-browser/auxiliaryWindowService.js';
 import '../platform/extensionManagement/electron-browser/extensionsProfileScannerService.js';
 import '../platform/webContentExtractor/electron-browser/webContentExtractorService.js';
 import './services/process/electron-browser/processService.js';
+import './services/power/electron-browser/powerService.js';
 
 import { registerSingleton } from '../platform/instantiation/common/extensions.js';
 import { IUserDataInitializationService, UserDataInitializationService } from './services/userData/browser/userDataInit.js';
@@ -154,6 +155,9 @@ import './contrib/externalTerminal/electron-browser/externalTerminal.contributio
 
 // Webview
 import './contrib/webview/electron-browser/webview.contribution.js';
+
+// Browser
+import './contrib/browserView/electron-browser/browserView.contribution.js';
 
 // Splash
 import './contrib/splash/electron-browser/splash.contribution.js';
