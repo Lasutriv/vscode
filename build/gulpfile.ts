@@ -46,7 +46,10 @@ gulp.task('default', _compileTask);
 
 process.on('unhandledRejection', (reason, p) => {
 	console.log('Unhandled Rejection at: Promise', p, 'reason:', reason);
-	process.exit(1);
+	const isWatchTask = process.argv.some(arg => arg.includes('watch'));
+	if (!isWatchTask) {
+		process.exit(1);
+	}
 });
 
 // Load all the gulpfiles only if running tasks other than the editor tasks

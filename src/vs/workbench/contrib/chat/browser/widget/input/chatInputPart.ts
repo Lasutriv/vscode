@@ -332,27 +332,6 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 	private inputEditorHasText: IContextKey<boolean>;
 	private chatCursorAtTop: IContextKey<boolean>;
 	private inputEditorHasFocus: IContextKey<boolean>;
-	private inputContextTokens: IContextKey<number>;
-	private inputContextHistoryTokens: IContextKey<number>;
-	private inputContextAttachmentTokens: IContextKey<number>;
-	private inputContextModeTokens: IContextKey<number>;
-	private inputContextDraftTokens: IContextKey<number>;
-	private inputContextMaxTokens: IContextKey<number>;
-	private inputContextUsagePercent: IContextKey<number>;
-	private lastRequestUsageAvailable: IContextKey<boolean>;
-	private lastRequestPromptTokens: IContextKey<number>;
-	private lastRequestCompletionTokens: IContextKey<number>;
-	private lastRequestTotalTokens: IContextKey<number>;
-	private lastRequestCachedPromptTokens: IContextKey<number>;
-	private lastRequestAcceptedPredictionTokens: IContextKey<number>;
-	private lastRequestRejectedPredictionTokens: IContextKey<number>;
-	private lastRequestMaxPromptTokens: IContextKey<number>;
-	private lastRequestPromptUsagePercent: IContextKey<number>;
-	private readonly _recomputeInputContextUsageScheduler: RunOnceScheduler;
-	private _recomputeInputContextUsageCts: CancellationTokenSource | undefined;
-	private _recomputeInputContextUsageRunCounter = 0;
-	private readonly _contextUsageDisposables = this._register(new DisposableStore());
-	private readonly _recomputeLastRequestUsageScheduler: RunOnceScheduler;
 	private currentlyEditingInputKey!: IContextKey<boolean>;
 	private chatModeKindKey: IContextKey<ChatModeKind>;
 	private chatModeNameKey: IContextKey<string>;
@@ -457,9 +436,6 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 	}
 
 	private _attemptedWorkingSetEntriesCount: number = 0;
-	private _lastRequestUsageDebugLoggedResponseId: string | undefined;
-	private _recomputeLastRequestUsageRunCounter = 0;
-	private _recomputeLastRequestUsageCts: CancellationTokenSource | undefined;
 	/**
 	 * The number of working set entries that the user actually wanted to attach.
 	 * This is less than or equal to {@link ChatInputPart.chatEditWorkingSetFiles}.
@@ -572,22 +548,6 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 		this.inputEditorHasText = ChatContextKeys.inputHasText.bindTo(contextKeyService);
 		this.chatCursorAtTop = ChatContextKeys.inputCursorAtTop.bindTo(contextKeyService);
 		this.inputEditorHasFocus = ChatContextKeys.inputHasFocus.bindTo(contextKeyService);
-		this.inputContextTokens = ChatContextKeys.inputContextTokens.bindTo(contextKeyService);
-		this.inputContextHistoryTokens = ChatContextKeys.inputContextHistoryTokens.bindTo(contextKeyService);
-		this.inputContextAttachmentTokens = ChatContextKeys.inputContextAttachmentTokens.bindTo(contextKeyService);
-		this.inputContextModeTokens = ChatContextKeys.inputContextModeTokens.bindTo(contextKeyService);
-		this.inputContextDraftTokens = ChatContextKeys.inputContextDraftTokens.bindTo(contextKeyService);
-		this.inputContextMaxTokens = ChatContextKeys.inputContextMaxTokens.bindTo(contextKeyService);
-		this.inputContextUsagePercent = ChatContextKeys.inputContextUsagePercent.bindTo(contextKeyService);
-		this.lastRequestUsageAvailable = ChatContextKeys.lastRequestUsageAvailable.bindTo(contextKeyService);
-		this.lastRequestPromptTokens = ChatContextKeys.lastRequestPromptTokens.bindTo(contextKeyService);
-		this.lastRequestCompletionTokens = ChatContextKeys.lastRequestCompletionTokens.bindTo(contextKeyService);
-		this.lastRequestTotalTokens = ChatContextKeys.lastRequestTotalTokens.bindTo(contextKeyService);
-		this.lastRequestCachedPromptTokens = ChatContextKeys.lastRequestCachedPromptTokens.bindTo(contextKeyService);
-		this.lastRequestAcceptedPredictionTokens = ChatContextKeys.lastRequestAcceptedPredictionTokens.bindTo(contextKeyService);
-		this.lastRequestRejectedPredictionTokens = ChatContextKeys.lastRequestRejectedPredictionTokens.bindTo(contextKeyService);
-		this.lastRequestMaxPromptTokens = ChatContextKeys.lastRequestMaxPromptTokens.bindTo(contextKeyService);
-		this.lastRequestPromptUsagePercent = ChatContextKeys.lastRequestPromptUsagePercent.bindTo(contextKeyService);
 		this.chatModeKindKey = ChatContextKeys.chatModeKind.bindTo(contextKeyService);
 		this.chatModeNameKey = ChatContextKeys.chatModeName.bindTo(contextKeyService);
 		this.withinEditSessionKey = ChatContextKeys.withinEditSessionDiff.bindTo(contextKeyService);
@@ -665,7 +625,6 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 				this.accessibilityService.alert(lm.metadata.name);
 			}
 			this._inputEditor?.updateOptions({ ariaLabel: this._getAriaLabel() });
-			this._scheduleRecomputeInputContextUsage();
 		}));
 		this._register(this.chatModeService.onDidChangeChatModes(() => this.validateCurrentChatMode()));
 		this._register(autorun(r => {
@@ -1783,17 +1742,6 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 			this.clearQuestionCarousel();
 		}));
 
-		this._register(widget.onDidChangeViewModel(() => {
-			this._updateContextUsageModelListeners();
-			this._scheduleRecomputeInputContextUsage();
-			this._scheduleRecomputeLastRequestUsage();
-		}));
-		this._register(widget.onDidAcceptInput(() => {
-			this._scheduleRecomputeInputContextUsage();
-			this._scheduleRecomputeLastRequestUsage();
-		}));
-		this._updateContextUsageModelListeners();
-
 		let elements;
 		if (this.options.renderStyle === 'compact') {
 			elements = dom.h('.interactive-input-part', [
@@ -1886,7 +1834,6 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 				this._indexOfLastAttachedContextDeletedWithKeyboard = -1;
 			}
 			this._handleAttachedContextChange();
-			this._scheduleRecomputeInputContextUsage();
 		}));
 
 		this.renderChatEditingSessionState(null);
@@ -1971,7 +1918,6 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 
 			// Debounced sync to model for text changes
 			this._syncTextDebounced.schedule();
-			this._scheduleRecomputeInputContextUsage();
 		}));
 		this._register(this._inputEditor.onDidContentSizeChange(e => {
 			if (e.contentHeightChanged) {
@@ -2164,7 +2110,6 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 			const lineNumber = this.inputModel.getLineCount();
 			this._inputEditor.setPosition({ lineNumber, column: this.inputModel.getLineMaxColumn(lineNumber) });
 		}
-		this._scheduleRecomputeInputContextUsage();
 
 		const onDidChangeCursorPosition = () => {
 			const model = this._inputEditor.getModel();

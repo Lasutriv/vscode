@@ -233,7 +233,6 @@ export class XtermTerminal extends Disposable implements IXtermTerminal, IDetach
 			minimumContrastRatio: config.minimumContrastRatio,
 			tabStopWidth: config.tabStopWidth,
 			cursorBlink: config.cursorBlinking,
-			blinkIntervalDuration: config.textBlinking ? TextBlinkConstants.IntervalDuration : 0,
 			cursorStyle: vscodeToXtermCursorStyle<'cursorStyle'>(config.cursorStyle),
 			cursorInactiveStyle: vscodeToXtermCursorStyle(config.cursorStyleInactive),
 			cursorWidth: config.cursorWidth,
@@ -260,6 +259,8 @@ export class XtermTerminal extends Disposable implements IXtermTerminal, IDetach
 				getWinSizeChars: true,
 			},
 		}));
+		(this.raw.options as ITerminalOptions & { fastScrollModifier?: 'alt' | 'ctrl' | 'shift' | 'meta' }).fastScrollModifier = 'alt';
+		(this.raw.options as ITerminalOptions & { blinkIntervalDuration?: number }).blinkIntervalDuration = config.textBlinking ? TextBlinkConstants.IntervalDuration : 0;
 		this._updateSmoothScrolling();
 		interface ITerminalWithCore extends RawXtermTerminal {
 			_core: IXtermCore;
@@ -547,6 +548,7 @@ export class XtermTerminal extends Disposable implements IXtermTerminal, IDetach
 		this.raw.options.macOptionClickForcesSelection = config.macOptionClickForcesSelection;
 		this.raw.options.rightClickSelectsWord = config.rightClickBehavior === 'selectWord';
 		this.raw.options.wordSeparator = config.wordSeparators;
+		(this.raw.options as ITerminalOptions & { customGlyphs?: boolean }).customGlyphs = config.customGlyphs;
 		this.raw.options.ignoreBracketedPasteMode = config.ignoreBracketedPasteMode;
 		this.raw.options.rescaleOverlappingGlyphs = config.rescaleOverlappingGlyphs;
 		this.raw.options.vtExtensions = {
@@ -800,7 +802,7 @@ export class XtermTerminal extends Disposable implements IXtermTerminal, IDetach
 
 	private _setTextBlinking(enabled: boolean): void {
 		const blinkIntervalDuration = enabled ? TextBlinkConstants.IntervalDuration : 0;
-		const options = this.raw.options;
+		const options = this.raw.options as ITerminalOptions & { blinkIntervalDuration?: number };
 		if (options.blinkIntervalDuration !== blinkIntervalDuration) {
 			options.blinkIntervalDuration = blinkIntervalDuration;
 		}
