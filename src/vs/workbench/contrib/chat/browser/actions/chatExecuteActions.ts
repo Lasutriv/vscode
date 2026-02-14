@@ -29,6 +29,7 @@ import { ChatAgentLocation, ChatConfiguration, ChatModeKind, } from '../../commo
 import { ILanguageModelChatMetadata } from '../../common/languageModels.js';
 import { ILanguageModelToolsService } from '../../common/tools/languageModelToolsService.js';
 import { PromptsStorage } from '../../common/promptSyntax/service/promptsService.js';
+import { isInClaudeAgentsFolder } from '../../common/promptSyntax/config/promptFileLocations.js';
 import { IChatSessionsService } from '../../common/chatSessionsService.js';
 import { IChatWidget, IChatWidgetService } from '../chat.js';
 import { getAgentSessionProvider, AgentSessionProviders } from '../agentSessions/agentSessions.js';
@@ -260,6 +261,7 @@ type ChatModeChangeClassification = {
 	extensionId?: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'Extension ID if the target mode is from an extension' };
 	toolsCount?: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'Number of custom tools in the target mode'; 'isMeasurement': true };
 	handoffsCount?: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'Number of handoffs in the target mode'; 'isMeasurement': true };
+	isClaudeAgent?: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'Whether the target mode is a Claude agent file from .claude/agents/' };
 };
 
 type ChatModeChangeEvent = {
@@ -270,6 +272,7 @@ type ChatModeChangeEvent = {
 	extensionId?: string;
 	toolsCount?: number;
 	handoffsCount?: number;
+	isClaudeAgent?: boolean;
 };
 
 class ToggleChatModeAction extends Action2 {
@@ -337,6 +340,9 @@ class ToggleChatModeAction extends Action2 {
 			return mode.name.get();
 		};
 
+		const modeUri = switchToMode.uri?.get();
+		const isClaudeAgent = modeUri ? isInClaudeAgentsFolder(modeUri) : undefined;
+
 		telemetryService.publicLog2<ChatModeChangeEvent, ChatModeChangeClassification>('chat.modeChange', {
 			fromMode: getModeNameForTelemetry(currentMode),
 			mode: getModeNameForTelemetry(switchToMode),
@@ -344,7 +350,8 @@ class ToggleChatModeAction extends Action2 {
 			storage,
 			extensionId,
 			toolsCount,
-			handoffsCount
+			handoffsCount,
+			isClaudeAgent
 		});
 
 		widget.input.setChatMode(switchToMode.id);
@@ -649,10 +656,15 @@ export class ChatEditingSessionSubmitAction extends SubmitAction {
 	static readonly ID = 'workbench.action.edits.submit';
 
 	constructor() {
+		const notInProgressOrEditing = ContextKeyExpr.and(
+			ContextKeyExpr.or(whenNotInProgress, ChatContextKeys.editingRequestType.isEqualTo(ChatContextKeys.EditingRequestType.Sent)),
+			ChatContextKeys.editingRequestType.notEqualsTo(ChatContextKeys.EditingRequestType.QueueOrSteer)
+		);
+
 		const menuCondition = ChatContextKeys.chatModeKind.notEqualsTo(ChatModeKind.Ask);
 		const precondition = ContextKeyExpr.and(
 			ChatContextKeys.inputHasText,
-			whenNotInProgress,
+			notInProgressOrEditing,
 			ChatContextKeys.chatSessionOptionsValid
 		);
 
@@ -668,7 +680,7 @@ export class ChatEditingSessionSubmitAction extends SubmitAction {
 					id: MenuId.ChatExecute,
 					order: 4,
 					when: ContextKeyExpr.and(
-						whenNotInProgress,
+						notInProgressOrEditing,
 						menuCondition),
 					group: 'navigation',
 					alt: {
@@ -803,6 +815,9 @@ class SendToNewChatAction extends Action2 {
 				return;
 			}
 		}
+
+		// Clear the input from the current session before creating a new one
+		widget.setInput('');
 
 		await widget.clear();
 		widget.acceptInput(inputBeforeClear, { storeToHistory: true });

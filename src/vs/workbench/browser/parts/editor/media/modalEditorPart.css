@@ -6,15 +6,17 @@
 /** Modal Editor Part: Modal Block */
 .monaco-modal-editor-block {
 	position: fixed;
-	height: 100%;
 	width: 100%;
-	left: 0;
+	height: 100%;
 	top: 0;
-	/* z-index for modal editors: below dialogs, quick input, context views, hovers but above other things */
-	z-index: 2000;
+	left: 0;
+	/* z-index for modal editors: above titlebar (2500) but below dialogs (2575) */
+	z-index: 2550;
 	display: flex;
 	justify-content: center;
 	align-items: center;
+	/* Never allow content to escape above the title bar */
+	overflow: hidden;
 }
 
 .monaco-modal-editor-block.dimmed {
@@ -52,6 +54,7 @@
 	height: 32px;
 	min-height: 32px;
 	padding: 0 8px 0 16px;
+	color: var(--vscode-titleBar-activeForeground);
 	background-color: var(--vscode-titleBar-activeBackground);
 	border-bottom: 1px solid var(--vscode-titleBar-border, transparent);
 }
@@ -75,6 +78,10 @@
 
 .monaco-modal-editor-block .modal-editor-action-container .actions-container {
 	gap: 4px;
+}
+
+.monaco-modal-editor-block .modal-editor-action-container .actions-container .codicon {
+	color: inherit;
 }
 
 /** Modal Editor Part: Ensure proper sizing */

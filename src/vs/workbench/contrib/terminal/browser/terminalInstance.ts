@@ -150,7 +150,6 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 	private _latestXtermParseData: number = 0;
 	private _isExiting: boolean;
 	private _hadFocusOnExit: boolean;
-	private _isVisible: boolean;
 	private _exitCode: number | undefined;
 	private _exitReason: TerminalExitReason | undefined;
 	private _skipTerminalCommands: string[];
@@ -217,6 +216,9 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 	set waitOnExit(value: ITerminalInstance['waitOnExit']) {
 		this._shellLaunchConfig.waitOnExit = value;
 	}
+
+	private _isVisible: boolean;
+	get isVisible(): boolean { return this._isVisible; }
 
 	private _targetRef: ImmortalReference<TerminalLocation | undefined> = new ImmortalReference(undefined);
 	get targetRef(): IReference<TerminalLocation | undefined> { return this._targetRef; }
@@ -474,12 +476,14 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 				}
 				case TerminalCapability.CommandDetection: {
 					e.capability.promptInputModel.setShellType(this.shellType);
-					capabilityListeners.set(e.id, Event.any(
+					// Use DisposableStore to track multiple listeners for this capability
+					const store = new DisposableStore();
+					store.add(Event.any(
 						e.capability.promptInputModel.onDidStartInput,
 						e.capability.promptInputModel.onDidChangeInput,
 						e.capability.promptInputModel.onDidFinishInput
 					)(refreshInfo));
-					this._register(e.capability.onCommandExecuted(async (command) => {
+					store.add(e.capability.onCommandExecuted(async (command) => {
 						// Only generate ID if command doesn't already have one (i.e., it's a manual command, not Copilot-initiated)
 						// The tool terminal sets the command ID before command start, so this won't override it
 						if (!command.id && command.command) {
@@ -488,6 +492,7 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 							await this._processManager.setNextCommandId(command.command, commandId);
 						}
 					}));
+					capabilityListeners.set(e.id, store);
 					break;
 				}
 				case TerminalCapability.PromptTypeDetection: {

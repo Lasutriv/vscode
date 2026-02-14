@@ -34,6 +34,7 @@ import { ChatTreeItem, IChatAccessibilityService, IChatCodeBlockInfo, IChatFileT
 import { CodeBlockPart } from './chatContentParts/codeBlockPart.js';
 import { ChatListDelegate, ChatListItemRenderer, IChatListItemTemplate, IChatRendererDelegate } from './chatListRenderer.js';
 import { ChatEditorOptions } from './chatOptions.js';
+import { ChatPendingDragController } from './chatPendingDragAndDrop.js';
 
 export interface IChatListWidgetStyles {
 	listForeground?: string;
@@ -349,6 +350,11 @@ export class ChatListWidget extends Disposable {
 				this.chatService.resendRequest(request, sendOptions).catch(e => this.logService.error('FAILED to rerun request', e));
 			}
 		}));
+
+		// Create drag-and-drop controller for reordering pending requests
+		this._renderer.pendingDragController = this._register(
+			scopedInstantiationService.createInstance(ChatPendingDragController, this._container, () => this._viewModel)
+		);
 
 		// Create tree
 		const styles = options.styles ?? {};
@@ -782,6 +788,8 @@ export class ChatListWidget extends Disposable {
 	editorsInUse(): Iterable<CodeBlockPart> {
 		return this._renderer.editorsInUse();
 	}
+
+
 
 	/**
 	 * Get template data for a request ID.

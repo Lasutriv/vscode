@@ -125,6 +125,7 @@ import { IModePickerDelegate, ModePickerActionItem } from './modePickerActionIte
 import { SessionTypePickerActionItem } from './sessionTargetPickerActionItem.js';
 import { WorkspacePickerActionItem } from './workspacePickerActionItem.js';
 import { ChatContextUsageWidget } from '../../widgetHosts/viewPane/chatContextUsageWidget.js';
+import { Target } from '../../../common/promptSyntax/service/promptsService.js';
 
 const $ = dom.$;
 
@@ -288,13 +289,23 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 
 	private chatEditingSessionWidgetContainer!: HTMLElement;
 	private chatInputTodoListWidgetContainer!: HTMLElement;
+	private chatGettingStartedTipContainer!: HTMLElement;
 	private chatQuestionCarouselContainer!: HTMLElement;
 	private chatInputWidgetsContainer!: HTMLElement;
+	private inputContainer!: HTMLElement;
 	private readonly _widgetController = this._register(new MutableDisposable<ChatInputPartWidgetController>());
 
 	private contextUsageWidget?: ChatContextUsageWidget;
 	private contextUsageWidgetContainer!: HTMLElement;
 	private readonly _contextUsageDisposables = this._register(new MutableDisposable<DisposableStore>());
+
+	get inputContainerElement(): HTMLElement | undefined {
+		return this.inputContainer;
+	}
+
+	get gettingStartedTipContainerElement(): HTMLElement {
+		return this.chatGettingStartedTipContainer;
+	}
 
 	readonly height = observableValue<number>(this, 0);
 
@@ -333,6 +344,7 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 	private chatCursorAtTop: IContextKey<boolean>;
 	private inputEditorHasFocus: IContextKey<boolean>;
 	private currentlyEditingInputKey!: IContextKey<boolean>;
+	private editingSentRequestKey!: IContextKey<ChatContextKeys.EditingRequestType | undefined>;
 	private chatModeKindKey: IContextKey<ChatModeKind>;
 	private chatModeNameKey: IContextKey<string>;
 	private withinEditSessionKey: IContextKey<boolean>;
@@ -677,7 +689,7 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 
 	private initSelectedModel() {
 		const persistedSelection = this.storageService.get(this.getSelectedModelStorageKey(), StorageScope.APPLICATION);
-		const persistedAsDefault = this.storageService.getBoolean(this.getSelectedModelIsDefaultStorageKey(), StorageScope.APPLICATION, persistedSelection === 'copilot/gpt-4.1');
+		const persistedAsDefault = this.storageService.getBoolean(this.getSelectedModelIsDefaultStorageKey(), StorageScope.APPLICATION, true);
 
 		if (persistedSelection) {
 			const model = this.getModels().find(m => m.identifier === persistedSelection);
@@ -717,8 +729,9 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 		}));
 	}
 
-	public setEditing(enabled: boolean) {
+	public setEditing(enabled: boolean, editingSentRequest: ChatContextKeys.EditingRequestType | undefined) {
 		this.currentlyEditingInputKey?.set(enabled);
+		this.editingSentRequestKey?.set(editingSentRequest);
 	}
 
 	public switchModel(modelMetadata: Pick<ILanguageModelChatMetadata, 'vendor' | 'id' | 'family'>) {
@@ -1424,7 +1437,7 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 
 		// Check if this session type has a customAgentTarget
 		const customAgentTarget = ctx && this.chatSessionsService.getCustomAgentTargetForSessionType(ctx.chatSessionType);
-		this.chatSessionHasCustomAgentTarget.set(!!customAgentTarget);
+		this.chatSessionHasCustomAgentTarget.set(customAgentTarget !== Target.Undefined);
 
 		// Handle agent option from session - set initial mode
 		if (customAgentTarget) {
@@ -1696,6 +1709,14 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 	}
 
 	/**
+	 * Shows the context usage details popup and focuses it.
+	 * @returns Whether the details were successfully shown.
+	 */
+	showContextUsageDetails(): boolean {
+		return this.contextUsageWidget?.showDetails() ?? false;
+	}
+
+	/**
 	 * Updates the context usage widget based on the current model.
 	 */
 	private updateContextUsageWidget(): void {
@@ -1750,6 +1771,7 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 					dom.h('.chat-input-widgets-container@chatInputWidgetsContainer'),
 					dom.h('.chat-todo-list-widget-container@chatInputTodoListWidgetContainer'),
 					dom.h('.chat-editing-session@chatEditingSessionWidgetContainer'),
+					dom.h('.chat-getting-started-tip-container@chatGettingStartedTipContainer'),
 					dom.h('.interactive-input-and-side-toolbar@inputAndSideToolbar', [
 						dom.h('.chat-input-container@inputContainer', [
 							dom.h('.chat-context-usage-container@contextUsageWidgetContainer'),
@@ -1771,6 +1793,7 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 				dom.h('.chat-input-widgets-container@chatInputWidgetsContainer'),
 				dom.h('.chat-todo-list-widget-container@chatInputTodoListWidgetContainer'),
 				dom.h('.chat-editing-session@chatEditingSessionWidgetContainer'),
+				dom.h('.chat-getting-started-tip-container@chatGettingStartedTipContainer'),
 				dom.h('.interactive-input-and-side-toolbar@inputAndSideToolbar', [
 					dom.h('.chat-input-container@inputContainer', [
 						dom.h('.chat-context-usage-container@contextUsageWidgetContainer'),
@@ -1797,6 +1820,7 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 		this.followupsContainer = elements.followupsContainer;
 		const inputAndSideToolbar = elements.inputAndSideToolbar; // The chat input and toolbar to the right
 		const inputContainer = elements.inputContainer; // The chat editor, attachments, and toolbars
+		this.inputContainer = inputContainer;
 		const editorContainer = elements.editorContainer;
 		this.attachmentsContainer = elements.attachmentsContainer;
 		this.attachedContextContainer = elements.attachedContextContainer;
@@ -1804,6 +1828,8 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 		const attachmentToolbarContainer = elements.attachmentToolbar;
 		this.chatEditingSessionWidgetContainer = elements.chatEditingSessionWidgetContainer;
 		this.chatInputTodoListWidgetContainer = elements.chatInputTodoListWidgetContainer;
+		this.chatGettingStartedTipContainer = elements.chatGettingStartedTipContainer;
+		this.chatGettingStartedTipContainer.style.display = 'none';
 		this.chatQuestionCarouselContainer = elements.chatQuestionCarouselContainer;
 		this.chatInputWidgetsContainer = elements.chatInputWidgetsContainer;
 		this.contextUsageWidgetContainer = elements.contextUsageWidgetContainer;
@@ -1843,6 +1869,7 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 		const inputScopedContextKeyService = this._register(this.contextKeyService.createScoped(inputContainer));
 		ChatContextKeys.inChatInput.bindTo(inputScopedContextKeyService).set(true);
 		this.currentlyEditingInputKey = ChatContextKeys.currentlyEditingInput.bindTo(inputScopedContextKeyService);
+		this.editingSentRequestKey = ChatContextKeys.editingRequestType.bindTo(this.contextKeyService);
 		const scopedInstantiationService = this._register(this.instantiationService.createChild(new ServiceCollection([IContextKeyService, inputScopedContextKeyService])));
 
 		const { historyNavigationBackwardsEnablement, historyNavigationForwardsEnablement } = this._register(registerAndCreateHistoryNavigationContext(inputScopedContextKeyService, this));
@@ -1997,7 +2024,7 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 						customAgentTarget: () => {
 							const sessionResource = this._widget?.viewModel?.model.sessionResource;
 							const ctx = sessionResource && this.chatService.getChatSessionFromInternalUri(sessionResource);
-							return ctx && this.chatSessionsService.getCustomAgentTargetForSessionType(ctx.chatSessionType);
+							return (ctx && this.chatSessionsService.getCustomAgentTargetForSessionType(ctx.chatSessionType)) ?? Target.Undefined;
 						},
 					};
 					return this.modeWidget = this.instantiationService.createInstance(ModePickerActionItem, action, delegate, pickerOptions);
@@ -2450,6 +2477,20 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 
 	get questionCarousel(): ChatQuestionCarouselPart | undefined {
 		return this._chatQuestionCarouselWidget.value;
+	}
+
+	focusQuestionCarousel(): boolean {
+		const carousel = this._chatQuestionCarouselWidget.value;
+		if (carousel) {
+			carousel.focus();
+			return true;
+		}
+		return false;
+	}
+
+	isQuestionCarouselFocused(): boolean {
+		const carousel = this._chatQuestionCarouselWidget.value;
+		return carousel?.hasFocus() ?? false;
 	}
 
 	setWorkingSetCollapsed(collapsed: boolean): void {

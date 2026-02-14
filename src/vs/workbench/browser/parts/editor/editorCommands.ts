@@ -27,7 +27,7 @@ import { ITelemetryService } from '../../../../platform/telemetry/common/telemet
 import { ActiveGroupEditorsByMostRecentlyUsedQuickAccess } from './editorQuickAccess.js';
 import { SideBySideEditor } from './sideBySideEditor.js';
 import { TextDiffEditor } from './textDiffEditor.js';
-import { ActiveEditorCanSplitInGroupContext, ActiveEditorGroupEmptyContext, ActiveEditorGroupLockedContext, ActiveEditorStickyContext, EditorPartModalContext, MultipleEditorGroupsContext, SideBySideEditorActiveContext, TextCompareEditorActiveContext } from '../../../common/contextkeys.js';
+import { ActiveEditorCanSplitInGroupContext, ActiveEditorGroupEmptyContext, ActiveEditorGroupLockedContext, ActiveEditorStickyContext, EditorPartModalContext, EditorPartModalMaximizedContext, MultipleEditorGroupsContext, SideBySideEditorActiveContext, TextCompareEditorActiveContext } from '../../../common/contextkeys.js';
 import { CloseDirection, EditorInputCapabilities, EditorsOrder, IResourceDiffEditorInput, IUntitledTextResourceEditorInput, isEditorInputWithOptionsAndGroup } from '../../../common/editor.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
 import { SideBySideEditorInput } from '../../../common/editor/sideBySideEditorInput.js';
@@ -107,7 +107,7 @@ export const NEW_EMPTY_EDITOR_WINDOW_COMMAND_ID = 'workbench.action.newEmptyEdit
 
 export const CLOSE_MODAL_EDITOR_COMMAND_ID = 'workbench.action.closeModalEditor';
 export const MOVE_MODAL_EDITOR_TO_MAIN_COMMAND_ID = 'workbench.action.moveModalEditorToMain';
-export const MOVE_MODAL_EDITOR_TO_NEW_WINDOW_COMMAND_ID = 'workbench.action.moveModalEditorToNewWindow';
+export const TOGGLE_MODAL_EDITOR_MAXIMIZED_COMMAND_ID = 'workbench.action.toggleModalEditorMaximized';
 
 export const API_OPEN_EDITOR_COMMAND_ID = '_workbench.open';
 export const API_OPEN_DIFF_EDITOR_COMMAND_ID = '_workbench.diff';
@@ -1439,12 +1439,16 @@ function registerModalEditorCommands(): void {
 	registerAction2(class extends Action2 {
 		constructor() {
 			super({
-				id: MOVE_MODAL_EDITOR_TO_NEW_WINDOW_COMMAND_ID,
-				title: localize2('moveModalEditorToNewWindow', 'Open Modal Editor as Floating Window'),
+				id: TOGGLE_MODAL_EDITOR_MAXIMIZED_COMMAND_ID,
+				title: localize2('toggleModalEditorMaximized', 'Maximize Modal Editor'),
 				category: Categories.View,
 				f1: true,
-				icon: Codicon.emptyWindow,
 				precondition: EditorPartModalContext,
+				icon: Codicon.screenFull,
+				toggled: {
+					condition: EditorPartModalMaximizedContext,
+					title: localize('restoreModalEditorSize', "Restore Modal Editor")
+				},
 				menu: {
 					id: MenuId.ModalEditorTitle,
 					group: 'navigation',
@@ -1452,19 +1456,12 @@ function registerModalEditorCommands(): void {
 				}
 			});
 		}
-		async run(accessor: ServicesAccessor): Promise<void> {
+		run(accessor: ServicesAccessor): void {
 			const editorGroupsService = accessor.get(IEditorGroupsService);
 
 			for (const part of editorGroupsService.parts) {
 				if (isModalEditorPart(part)) {
-					const auxiliaryEditorPart = await editorGroupsService.createAuxiliaryEditorPart({ alwaysOnTop: true, compact: true });
-
-					for (const group of part.getGroups(GroupsOrder.MOST_RECENTLY_ACTIVE)) {
-						editorGroupsService.mergeGroup(group, auxiliaryEditorPart.activeGroup);
-					}
-
-					part.close();
-					auxiliaryEditorPart.activeGroup.focus();
+					part.toggleMaximized();
 					break;
 				}
 			}
@@ -1511,6 +1508,8 @@ function isModalEditorPart(obj: unknown): obj is IModalEditorPart {
 	return !!part
 		&& typeof part.close === 'function'
 		&& typeof part.onWillClose === 'function'
+		&& typeof part.toggleMaximized === 'function'
+		&& typeof part.maximized === 'boolean'
 		&& part.windowId === mainWindow.vscodeWindowId;
 }
 

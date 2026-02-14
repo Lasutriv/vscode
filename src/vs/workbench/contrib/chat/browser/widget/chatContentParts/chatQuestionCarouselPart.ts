@@ -10,6 +10,7 @@ import { KeyCode } from '../../../../../../base/common/keyCodes.js';
 import { Disposable, DisposableStore, MutableDisposable } from '../../../../../../base/common/lifecycle.js';
 import { hasKey } from '../../../../../../base/common/types.js';
 import { localize } from '../../../../../../nls.js';
+import { IAccessibilityService } from '../../../../../../platform/accessibility/common/accessibility.js';
 import { defaultButtonStyles, defaultCheckboxStyles, defaultInputBoxStyles } from '../../../../../../platform/theme/browser/defaultStyles.js';
 import { Button } from '../../../../../../base/browser/ui/button/button.js';
 import { InputBox } from '../../../../../../base/browser/ui/inputbox/inputBox.js';
@@ -66,10 +67,17 @@ export class ChatQuestionCarouselPart extends Disposable implements IChatContent
 		context: IChatContentPartRenderContext,
 		private readonly _options: IChatQuestionCarouselOptions,
 		@IHoverService private readonly _hoverService: IHoverService,
+		@IAccessibilityService private readonly _accessibilityService: IAccessibilityService,
 	) {
 		super();
 
 		this.domNode = dom.$('.chat-question-carousel-container');
+
+		// Set up accessibility attributes for the carousel container
+		this.domNode.tabIndex = 0;
+		this.domNode.setAttribute('role', 'region');
+		this.domNode.setAttribute('aria-roledescription', localize('chat.questionCarousel.roleDescription', 'chat question'));
+		this._updateAriaLabel();
 
 		// Restore answers from carousel data if already submitted (e.g., after re-render due to virtualization)
 		if (carousel.data) {
@@ -195,7 +203,7 @@ export class ChatQuestionCarouselPart extends Disposable implements IChatContent
 		if (newIndex >= 0 && newIndex < this.carousel.questions.length) {
 			this.saveCurrentAnswer();
 			this._currentIndex = newIndex;
-			this.renderCurrentQuestion();
+			this.renderCurrentQuestion(true);
 		}
 	}
 
@@ -209,11 +217,28 @@ export class ChatQuestionCarouselPart extends Disposable implements IChatContent
 		if (this._currentIndex < this.carousel.questions.length - 1) {
 			// Move to next question
 			this._currentIndex++;
-			this.renderCurrentQuestion();
+			this.renderCurrentQuestion(true);
 		} else {
 			// Submit
 			this._options.onSubmit(this._answers);
 			this.hideAndShowSummary();
+		}
+	}
+
+	/**
+	 * Focuses the container element and announces the question for screen reader users.
+	 */
+	private _focusContainerAndAnnounce(): void {
+		this.domNode.focus();
+		const question = this.carousel.questions[this._currentIndex];
+		if (question) {
+			const questionText = question.message ?? question.title;
+			const messageContent = typeof questionText === 'string' ? questionText : questionText.value;
+			const questionCount = this.carousel.questions.length;
+			const alertMessage = questionCount === 1
+				? messageContent
+				: localize('chat.questionCarousel.questionAlertMulti', 'Question {0} of {1}: {2}', this._currentIndex + 1, questionCount, messageContent);
+			this._accessibilityService.alert(alertMessage);
 		}
 	}
 
@@ -352,7 +377,54 @@ export class ChatQuestionCarouselPart extends Disposable implements IChatContent
 		}
 	}
 
-	private renderCurrentQuestion(): void {
+	/**
+	 * Returns whether auto-focus should be enabled.
+	 * Disabled when screen reader mode is active or when explicitly disabled via options.
+	 */
+	private _shouldAutoFocus(): boolean {
+		if (this._options.shouldAutoFocus === false) {
+			return false;
+		}
+		// Disable auto-focus for screen reader users to allow them to read the question first
+		return !this._accessibilityService.isScreenReaderOptimized();
+	}
+
+	/**
+	 * Updates the aria-label of the carousel container based on the current question.
+	 */
+	private _updateAriaLabel(): void {
+		const question = this.carousel.questions[this._currentIndex];
+		if (!question) {
+			this.domNode.setAttribute('aria-label', localize('chat.questionCarousel.label', 'Chat question'));
+			return;
+		}
+
+		const questionText = question.message ?? question.title;
+		const messageContent = typeof questionText === 'string' ? questionText : questionText.value;
+		const questionCount = this.carousel.questions.length;
+
+		if (questionCount === 1) {
+			this.domNode.setAttribute('aria-label', localize('chat.questionCarousel.singleQuestionLabel', 'Chat question: {0}', messageContent));
+		} else {
+			this.domNode.setAttribute('aria-label', localize('chat.questionCarousel.multiQuestionLabel', 'Chat question {0} of {1}: {2}', this._currentIndex + 1, questionCount, messageContent));
+		}
+	}
+
+	/**
+	 * Focuses the carousel container element.
+	 */
+	public focus(): void {
+		this.domNode.focus();
+	}
+
+	/**
+	 * Returns whether the carousel container has focus.
+	 */
+	public hasFocus(): boolean {
+		return dom.isAncestorOfActiveElement(this.domNode);
+	}
+
+	private renderCurrentQuestion(focusContainerForScreenReader: boolean = false): void {
 		if (!this._questionContainer || !this._prevButton || !this._nextButton) {
 			return;
 		}
@@ -445,6 +517,15 @@ export class ChatQuestionCarouselPart extends Disposable implements IChatContent
 			this._nextButtonHover.value = this._hoverService.setupDelayedHover(this._nextButton!.element, { content: nextLabel });
 		}
 
+		// Update aria-label to reflect the current question
+		this._updateAriaLabel();
+
+		// In screen reader mode, focus the container and announce the question
+		// This must happen after all render calls to avoid focus being stolen
+		if (focusContainerForScreenReader && this._accessibilityService.isScreenReaderOptimized()) {
+			this._focusContainerAndAnnounce();
+		}
+
 		this._onDidChangeHeight.fire();
 	}
 
@@ -493,7 +574,7 @@ export class ChatQuestionCarouselPart extends Disposable implements IChatContent
 		this._textInputBoxes.set(question.id, inputBox);
 
 		// Focus on input when rendered using proper DOM scheduling
-		if (this._options.shouldAutoFocus !== false) {
+		if (this._shouldAutoFocus()) {
 			this._inputBoxes.add(dom.runAtThisOrScheduleAtNextAnimationFrame(dom.getWindow(inputBox.element), () => inputBox.focus()));
 		}
 	}
@@ -696,7 +777,7 @@ export class ChatQuestionCarouselPart extends Disposable implements IChatContent
 		}
 
 		// focus on the row when first rendered or textarea if it has content
-		if (this._options.shouldAutoFocus !== false) {
+		if (this._shouldAutoFocus()) {
 			if (previousFreeform) {
 				this._inputBoxes.add(dom.runAtThisOrScheduleAtNextAnimationFrame(dom.getWindow(freeformTextarea), () => {
 					freeformTextarea.focus();
@@ -891,7 +972,7 @@ export class ChatQuestionCarouselPart extends Disposable implements IChatContent
 		}
 
 		// Focus on the appropriate row when rendered or textarea if it has content
-		if (this._options.shouldAutoFocus !== false) {
+		if (this._shouldAutoFocus()) {
 			if (previousFreeform) {
 				this._inputBoxes.add(dom.runAtThisOrScheduleAtNextAnimationFrame(dom.getWindow(freeformTextarea), () => {
 					freeformTextarea.focus();

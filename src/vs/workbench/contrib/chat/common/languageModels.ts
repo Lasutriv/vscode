@@ -176,6 +176,7 @@ export interface ILanguageModelChatMetadata {
 	readonly tooltip?: string;
 	readonly detail?: string;
 	readonly multiplier?: string;
+	readonly multiplierNumeric?: number;
 	readonly family: string;
 	readonly maxInputTokens: number;
 	readonly maxOutputTokens: number;
@@ -218,6 +219,36 @@ export interface ILanguageModelChatResponse {
 	stream: AsyncIterable<IChatResponsePart | IChatResponsePart[]>;
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	result: Promise<any>;
+}
+
+export async function getTextResponseFromStream(response: ILanguageModelChatResponse): Promise<string> {
+	let responseText = '';
+	const streaming = (async () => {
+		if (!response?.stream) {
+			return;
+		}
+		for await (const part of response.stream) {
+			if (Array.isArray(part)) {
+				for (const item of part) {
+					if (item.type === 'text') {
+						responseText += item.value;
+					}
+				}
+			} else if (part.type === 'text') {
+				responseText += part.value;
+			}
+		}
+	})();
+
+	try {
+		await Promise.all([response.result, streaming]);
+		return responseText;
+	} catch (err) {
+		if (responseText) {
+			return responseText;
+		}
+		throw err;
+	}
 }
 
 export interface ILanguageModelChatProvider {

@@ -273,6 +273,8 @@ export class MenuId {
 	static readonly ChatEditingCodeBlockContext = new MenuId('ChatEditingCodeBlockContext');
 	static readonly ChatTitleBarMenu = new MenuId('ChatTitleBarMenu');
 	static readonly ChatAttachmentsContext = new MenuId('ChatAttachmentsContext');
+	static readonly ChatTipContext = new MenuId('ChatTipContext');
+	static readonly ChatTipToolbar = new MenuId('ChatTipToolbar');
 	static readonly ChatToolOutputResourceToolbar = new MenuId('ChatToolOutputResourceToolbar');
 	static readonly ChatTextEditorMenu = new MenuId('ChatTextEditorMenu');
 	static readonly ChatToolOutputResourceContext = new MenuId('ChatToolOutputResourceContext');

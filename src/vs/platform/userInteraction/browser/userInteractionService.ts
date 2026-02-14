@@ -41,7 +41,7 @@ export interface IUserInteractionService {
 	 * Creates an observable that tracks whether the given element is hovered.
 	 * The observable is disposed when the disposable store is disposed.
 	 */
-	createHoverTracker(element: HTMLElement, store: DisposableStore): IObservable<boolean>;
+	createHoverTracker(element: Element, store: DisposableStore): IObservable<boolean>;
 
 	createDomFocusTracker(element: HTMLElement): IFocusTracker;
 }
@@ -67,7 +67,7 @@ export class MockUserInteractionService implements IUserInteractionService {
 		return constObservable(this._simulateFocus);
 	}
 
-	createHoverTracker(_element: HTMLElement, _store: DisposableStore): IObservable<boolean> {
+	createHoverTracker(_element: Element, _store: DisposableStore): IObservable<boolean> {
 		return constObservable(this._simulateHover);
 	}
 

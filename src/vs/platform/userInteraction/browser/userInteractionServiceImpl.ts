@@ -51,7 +51,7 @@ export class UserInteractionService implements IUserInteractionService {
 		return value;
 	}
 
-	createHoverTracker(element: HTMLElement, store: DisposableStore): IObservable<boolean> {
+	createHoverTracker(element: Element, store: DisposableStore): IObservable<boolean> {
 		const value = observableValue<boolean>('isHovered', false);
 		const onEnter = () => value.set(true, undefined);
 		const onLeave = () => value.set(false, undefined);
