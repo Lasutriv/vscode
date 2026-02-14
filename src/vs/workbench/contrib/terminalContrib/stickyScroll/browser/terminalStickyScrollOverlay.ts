@@ -479,7 +479,7 @@ export class TerminalStickyScrollOverlay extends Disposable {
 	}
 
 	private _getOptions(): ITerminalOptions {
-		const o = this._xterm.raw.options as ITerminalOptions & { customGlyphs?: boolean };
+		const o = this._xterm.raw.options as ITerminalOptions;
 		const options: ITerminalOptions = {
 			cursorInactiveStyle: 'none',
 			scrollback: 0,
@@ -496,7 +496,6 @@ export class TerminalStickyScrollOverlay extends Disposable {
 			drawBoldTextInBrightColors: o.drawBoldTextInBrightColors,
 			minimumContrastRatio: o.minimumContrastRatio,
 			tabStopWidth: o.tabStopWidth,
-			customGlyphs: o.customGlyphs,
 		};
 		return options;
 	}

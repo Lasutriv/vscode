@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import type MarkdownIt from 'markdown-it';
+import type * as MarkdownItToken from 'markdown-it/lib/token';
 import * as vscode from 'vscode';
 import { ILogger } from './logging';
 import { MarkdownContributionProvider } from './markdownExtensions';
@@ -49,9 +50,9 @@ class TokenCache {
 		readonly version: number;
 		readonly config: MarkdownItConfig;
 	};
-	private _tokens?: MarkdownIt.Token[];
+	private _tokens?: MarkdownItToken[];
 
-	public tryGetCached(document: ITextDocument, config: MarkdownItConfig): MarkdownIt.Token[] | undefined {
+	public tryGetCached(document: ITextDocument, config: MarkdownItConfig): MarkdownItToken[] | undefined {
 		if (this._cachedDocument
 			&& this._cachedDocument.uri.toString() === document.uri.toString()
 			&& document.version >= 0 && this._cachedDocument.version === document.version
@@ -63,7 +64,7 @@ class TokenCache {
 		return undefined;
 	}
 
-	public update(document: ITextDocument, config: MarkdownItConfig, tokens: MarkdownIt.Token[]) {
+	public update(document: ITextDocument, config: MarkdownItConfig, tokens: MarkdownItToken[]) {
 		this._cachedDocument = {
 			uri: document.uri,
 			version: document.version,
@@ -93,7 +94,7 @@ interface RenderEnv {
 export interface IMdParser {
 	readonly slugifier: ISlugifier;
 
-	tokenize(document: ITextDocument): Promise<MarkdownIt.Token[]>;
+	tokenize(document: ITextDocument): Promise<MarkdownItToken[]>;
 }
 
 export class MarkdownItEngine implements IMdParser {
@@ -141,18 +142,23 @@ export class MarkdownItEngine implements IMdParser {
 
 				const frontMatterPlugin = await import('markdown-it-front-matter');
 				// Extract rules from front matter plugin and apply at a lower precedence
-				let fontMatterRule: any;
-				frontMatterPlugin.default({
-					block: {
-						ruler: {
-							before: (_id: any, _id2: any, rule: any) => { fontMatterRule = rule; }
-						}
-					}
-				}, () => { /* noop */ });
+				let fontMatterRule: Parameters<typeof md.block.ruler.before>[2] | undefined;
+				const originalRulerBefore = md.block.ruler.before;
+				md.block.ruler.before = (beforeName, ruleName, rule, options) => {
+					fontMatterRule = rule;
+					return originalRulerBefore.call(md.block.ruler, beforeName, ruleName, rule, options);
+				};
+				try {
+					frontMatterPlugin.default(md, () => { /* noop */ });
+				} finally {
+					md.block.ruler.before = originalRulerBefore;
+				}
 
-				md.block.ruler.before('fence', 'front_matter', fontMatterRule, {
-					alt: ['paragraph', 'reference', 'blockquote', 'list']
-				});
+				if (fontMatterRule) {
+					md.block.ruler.before('fence', 'front_matter', fontMatterRule, {
+						alt: ['paragraph', 'reference', 'blockquote', 'list']
+					});
+				}
 
 				this._addImageRenderer(md);
 				this._addFencedRenderer(md);
@@ -178,7 +184,7 @@ export class MarkdownItEngine implements IMdParser {
 		document: ITextDocument,
 		config: MarkdownItConfig,
 		engine: MarkdownIt
-	): MarkdownIt.Token[] {
+	): MarkdownItToken[] {
 		const cached = this._tokenCache.tryGetCached(document, config);
 		if (cached) {
 			return cached;
@@ -226,7 +232,7 @@ export class MarkdownItEngine implements IMdParser {
 		};
 	}
 
-	public async tokenize(document: ITextDocument): Promise<MarkdownIt.Token[]> {
+	public async tokenize(document: ITextDocument): Promise<MarkdownItToken[]> {
 		const config = this._getConfig(document.uri);
 		const engine = await this._getEngine(config);
 		return this._tokenizeDocument(document, config, engine);
@@ -247,7 +253,7 @@ export class MarkdownItEngine implements IMdParser {
 
 	private _addImageRenderer(md: MarkdownIt): void {
 		const original = md.renderer.rules.image;
-		md.renderer.rules.image = (tokens: MarkdownIt.Token[], idx: number, options, env: RenderEnv, self) => {
+		md.renderer.rules.image = (tokens: MarkdownItToken[], idx: number, options, env: RenderEnv, self) => {
 			const token = tokens[idx];
 			const src = token.attrGet('src');
 			if (src) {
@@ -269,7 +275,7 @@ export class MarkdownItEngine implements IMdParser {
 
 	private _addFencedRenderer(md: MarkdownIt): void {
 		const original = md.renderer.rules['fenced'];
-		md.renderer.rules['fenced'] = (tokens: MarkdownIt.Token[], idx: number, options, env, self) => {
+		md.renderer.rules['fenced'] = (tokens: MarkdownItToken[], idx: number, options, env, self) => {
 			const token = tokens[idx];
 			if (token.map?.length) {
 				token.attrJoin('class', 'hljs');
@@ -311,7 +317,7 @@ export class MarkdownItEngine implements IMdParser {
 
 	private _addNamedHeaders(md: MarkdownIt): void {
 		const original = md.renderer.rules.heading_open;
-		md.renderer.rules.heading_open = (tokens: MarkdownIt.Token[], idx: number, options, env: unknown, self) => {
+		md.renderer.rules.heading_open = (tokens: MarkdownItToken[], idx: number, options, env: unknown, self) => {
 			const title = this._tokenToPlainText(tokens[idx + 1]);
 			const slug = (env as RenderEnv).slugifier ? (env as RenderEnv).slugifier.add(title) : this.slugifier.fromHeading(title);
 			tokens[idx].attrSet('id', slug.value);
@@ -324,9 +330,9 @@ export class MarkdownItEngine implements IMdParser {
 		};
 	}
 
-	private _tokenToPlainText(token: MarkdownIt.Token): string {
+	private _tokenToPlainText(token: MarkdownItToken): string {
 		if (token.children) {
-			return token.children.map(x => this._tokenToPlainText(x)).join('');
+			return token.children.map((x: MarkdownItToken) => this._tokenToPlainText(x)).join('');
 		}
 
 		switch (token.type) {
@@ -342,7 +348,7 @@ export class MarkdownItEngine implements IMdParser {
 	private _addLinkRenderer(md: MarkdownIt): void {
 		const original = md.renderer.rules.link_open;
 
-		md.renderer.rules.link_open = (tokens: MarkdownIt.Token[], idx: number, options, env, self) => {
+		md.renderer.rules.link_open = (tokens: MarkdownItToken[], idx: number, options, env, self) => {
 			const token = tokens[idx];
 			const href = token.attrGet('href');
 			// A string, including empty string, may be `href`.
