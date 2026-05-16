@@ -37,7 +37,7 @@ The core architecture follows these principles:
 The `extensions/` directory contains first-party extensions that ship with VS Code:
 - **Language support** - `typescript-language-features/`, `html-language-features/`, `css-language-features/`, etc.
 - **Core features** - `git/`, `debug-auto-launch/`, `emmet/`, `markdown-language-features/`
-- **Themes** - `theme-*` folders for default color themes
+- **Themes** - `theme-*` folders for default color themes, including `theme-agency-dark/`, one of the best custom themes for this build's navy and gold agency experience
 - **Development tools** - `extension-editing/`, `vscode-api-tests/`
 
 Each extension follows the standard VS Code extension structure with `package.json`, TypeScript sources, and contribution points to extend the workbench through the Extension API.
