@@ -60,6 +60,7 @@ import './services/path/browser/pathService.js';
 import './services/themes/browser/browserHostColorSchemeService.js';
 import './services/encryption/browser/encryptionService.js';
 import './services/imageResize/browser/imageResizeService.js';
+import './services/browserElements/browser/webBrowserElementsService.js';
 import './services/secrets/browser/secretStorageService.js';
 import './services/workingCopy/browser/workingCopyBackupService.js';
 import './services/tunnel/browser/tunnelService.js';
@@ -70,8 +71,8 @@ import './services/userDataProfile/browser/userDataProfileStorageService.js';
 import './services/configurationResolver/browser/configurationResolverService.js';
 import '../platform/extensionResourceLoader/browser/extensionResourceLoaderService.js';
 import './services/auxiliaryWindow/browser/auxiliaryWindowService.js';
-import './services/browserElements/browser/webBrowserElementsService.js';
 import './services/power/browser/powerService.js';
+import '../platform/sandbox/browser/sandboxHelperService.js';
 
 import { InstantiationType, registerSingleton } from '../platform/instantiation/common/extensions.js';
 import { IAccessibilityService } from '../platform/accessibility/common/accessibility.js';
@@ -101,6 +102,10 @@ import { IWebContentExtractorService, NullWebContentExtractorService, ISharedWeb
 import { IMcpGalleryManifestService } from '../platform/mcp/common/mcpGalleryManifest.js';
 import { WorkbenchMcpGalleryManifestService } from './services/mcp/browser/mcpGalleryManifestService.js';
 import { UserDataSyncResourceProviderService } from '../platform/userDataSync/common/userDataSyncResourceProvider.js';
+import { IAgentHostService } from '../platform/agentHost/common/agentService.js';
+import { EditorRemoteAgentHostServiceClient } from './services/agentHost/browser/editorRemoteAgentHostServiceClient.js';
+import { IRemoteAgentHostService, NullRemoteAgentHostService } from '../platform/agentHost/common/remoteAgentHostService.js';
+import { BrowserAgentHostDebugLogsExportService, IAgentHostDebugLogsExportService } from './contrib/chat/browser/actions/exportAgentHostDebugLogsAction.js';
 
 registerSingleton(IWorkbenchExtensionManagementService, ExtensionManagementService, InstantiationType.Delayed);
 registerSingleton(IAccessibilityService, AccessibilityService, InstantiationType.Delayed);
@@ -121,6 +126,9 @@ registerSingleton(ILanguagePackService, WebLanguagePacksService, InstantiationTy
 registerSingleton(IWebContentExtractorService, NullWebContentExtractorService, InstantiationType.Delayed);
 registerSingleton(ISharedWebContentExtractorService, NullSharedWebContentExtractorService, InstantiationType.Delayed);
 registerSingleton(IMcpGalleryManifestService, WorkbenchMcpGalleryManifestService, InstantiationType.Delayed);
+registerSingleton(IAgentHostService, EditorRemoteAgentHostServiceClient, InstantiationType.Delayed);
+registerSingleton(IRemoteAgentHostService, NullRemoteAgentHostService, InstantiationType.Delayed);
+registerSingleton(IAgentHostDebugLogsExportService, BrowserAgentHostDebugLogsExportService, InstantiationType.Delayed);
 
 //#endregion
 
@@ -173,5 +181,8 @@ import './contrib/remote/browser/remoteStartEntry.contribution.js';
 
 // Process Explorer
 import './contrib/processExplorer/browser/processExplorer.web.contribution.js';
+
+// Browser View
+import './contrib/browserView/browser/browserView.contribution.js';
 
 //#endregion

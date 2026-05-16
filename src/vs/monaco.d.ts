@@ -3722,6 +3722,11 @@ declare namespace monaco.editor {
 		 */
 		formatOnPaste?: boolean;
 		/**
+		 * Controls whether double-clicking next to a bracket or quote selects the content inside.
+		 * Defaults to true.
+		 */
+		doubleClickSelectsBlock?: boolean;
+		/**
 		 * Controls if the editor should allow to move selections via drag and drop.
 		 * Defaults to false.
 		 */
@@ -4250,6 +4255,10 @@ declare namespace monaco.editor {
 		 * Controls whether the search result and diff result automatically restarts from the beginning (or the end) when no further matches can be found
 		 */
 		loop?: boolean;
+		/**
+		 * Controls whether to close the Find Widget after an explicit find navigation command lands on a match.
+		 */
+		closeOnResult?: boolean;
 	}
 
 	export type GoToLocationValues = 'peek' | 'gotoAndPeek' | 'goto';
@@ -4302,6 +4311,11 @@ declare namespace monaco.editor {
 		 * Defaults to false.
 		 */
 		above?: boolean;
+		/**
+		 * Should long line warning hovers be shown (tokenization skipped, rendering paused)?
+		 * Defaults to true.
+		 */
+		showLongLineWarning?: boolean;
 	}
 
 	/**
@@ -5242,13 +5256,14 @@ declare namespace monaco.editor {
 		inlineCompletionsAccessibilityVerbose = 169,
 		effectiveEditContext = 170,
 		scrollOnMiddleClick = 171,
-		effectiveAllowVariableFonts = 172
+		effectiveAllowVariableFonts = 172,
+		doubleClickSelectsBlock = 173
 	}
 
 	export const EditorOptions: {
 		acceptSuggestionOnCommitCharacter: IEditorOption<EditorOption.acceptSuggestionOnCommitCharacter, boolean>;
 		acceptSuggestionOnEnter: IEditorOption<EditorOption.acceptSuggestionOnEnter, 'on' | 'off' | 'smart'>;
-		accessibilitySupport: IEditorOption<EditorOption.accessibilitySupport, AccessibilitySupport>;
+		accessibilitySupport: IEditorOption<EditorOption.accessibilitySupport, any>;
 		accessibilityPageSize: IEditorOption<EditorOption.accessibilityPageSize, number>;
 		allowOverflow: IEditorOption<EditorOption.allowOverflow, boolean>;
 		allowVariableLineHeights: IEditorOption<EditorOption.allowVariableLineHeights, boolean>;
@@ -5291,6 +5306,7 @@ declare namespace monaco.editor {
 		disableLayerHinting: IEditorOption<EditorOption.disableLayerHinting, boolean>;
 		disableMonospaceOptimizations: IEditorOption<EditorOption.disableMonospaceOptimizations, boolean>;
 		domReadOnly: IEditorOption<EditorOption.domReadOnly, boolean>;
+		doubleClickSelectsBlock: IEditorOption<EditorOption.doubleClickSelectsBlock, boolean>;
 		dragAndDrop: IEditorOption<EditorOption.dragAndDrop, boolean>;
 		emptySelectionClipboard: IEditorOption<EditorOption.emptySelectionClipboard, boolean>;
 		dropIntoEditor: IEditorOption<EditorOption.dropIntoEditor, Readonly<Required<IDropIntoEditorOptions>>>;
@@ -5310,7 +5326,7 @@ declare namespace monaco.editor {
 		foldingMaximumRegions: IEditorOption<EditorOption.foldingMaximumRegions, number>;
 		unfoldOnClickAfterEndOfLine: IEditorOption<EditorOption.unfoldOnClickAfterEndOfLine, boolean>;
 		fontFamily: IEditorOption<EditorOption.fontFamily, string>;
-		fontInfo: IEditorOption<EditorOption.fontInfo, FontInfo>;
+		fontInfo: IEditorOption<EditorOption.fontInfo, any>;
 		fontLigatures2: IEditorOption<EditorOption.fontLigatures, string>;
 		fontSize: IEditorOption<EditorOption.fontSize, number>;
 		fontWeight: IEditorOption<EditorOption.fontWeight, string>;
@@ -5350,7 +5366,7 @@ declare namespace monaco.editor {
 		pasteAs: IEditorOption<EditorOption.pasteAs, Readonly<Required<IPasteAsOptions>>>;
 		parameterHints: IEditorOption<EditorOption.parameterHints, Readonly<Required<IEditorParameterHintOptions>>>;
 		peekWidgetDefaultFocus: IEditorOption<EditorOption.peekWidgetDefaultFocus, 'tree' | 'editor'>;
-		placeholder: IEditorOption<EditorOption.placeholder, string>;
+		placeholder: IEditorOption<EditorOption.placeholder, string | undefined>;
 		definitionLinkOpensInPeek: IEditorOption<EditorOption.definitionLinkOpensInPeek, boolean>;
 		quickSuggestions: IEditorOption<EditorOption.quickSuggestions, InternalQuickSuggestionsOptions>;
 		quickSuggestionsDelay: IEditorOption<EditorOption.quickSuggestionsDelay, number>;
@@ -7543,6 +7559,18 @@ declare namespace monaco.languages {
 		id: string;
 	}
 
+	export interface IInlineCompletionProviderOption {
+		readonly id: string;
+		readonly label: string;
+		readonly values: readonly IInlineCompletionProviderOptionValue[];
+		readonly currentValueId: string;
+	}
+
+	export interface IInlineCompletionProviderOptionValue {
+		readonly id: string;
+		readonly label: string;
+	}
+
 	export class SelectedSuggestionInfo {
 		readonly range: IRange;
 		readonly text: string;
@@ -7697,6 +7725,9 @@ declare namespace monaco.languages {
 		modelInfo?: IInlineCompletionModelInfo;
 		onDidModelInfoChange?: IEvent<void>;
 		setModelId?(modelId: string): Promise<void>;
+		providerOptions?: readonly IInlineCompletionProviderOption[];
+		onDidProviderOptionsChange?: IEvent<void>;
+		setProviderOption?(optionId: string, valueId: string): Promise<void>;
 		toString?(): string;
 	}
 

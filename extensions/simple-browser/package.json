@@ -143,6 +143,12 @@
           "when": "activeWebviewPanelId == 'simpleBrowser.view'",
           "group": "navigation@8"
         }
+      ],
+      "commandPalette": [
+        {
+          "command": "simpleBrowser.show",
+          "when": "isWeb"
+        }
       ]
     },
     "configuration": [
@@ -154,16 +160,6 @@
             "default": true,
             "title": "Focus Lock Indicator Enabled",
             "description": "%configuration.focusLockIndicator.enabled.description%"
-          },
-          "simpleBrowser.useIntegratedBrowser": {
-            "type": "boolean",
-            "default": false,
-            "markdownDescription": "%configuration.useIntegratedBrowser.description%",
-            "scope": "application",
-            "tags": [
-              "experimental",
-              "onExP"
-            ]
           }
         }
       }
@@ -175,8 +171,12 @@
     "vscode:prepublish": "npm run build-ext && npm run build-webview",
     "build-ext": "node ../../node_modules/gulp/bin/gulp.js --gulpfile ../../build/gulpfile.extensions.mjs compile-extension:simple-browser ./tsconfig.json",
     "build-webview": "node ./esbuild.webview.mts",
-    "compile-web": "npx webpack-cli --config extension-browser.webpack.config --mode none",
-    "watch-web": "npx webpack-cli --config extension-browser.webpack.config --mode none --watch --info-verbosity verbose"
+    "compile-web": "npm-run-all2 -lp bundle-web typecheck-web",
+    "bundle-web": "node ./esbuild.browser.mts",
+    "typecheck-web": "tsgo --project ./tsconfig.json --noEmit",
+    "watch-web": "npm-run-all2 -lp watch-bundle-web watch-typecheck-web",
+    "watch-bundle-web": "node ./esbuild.browser.mts --watch",
+    "watch-typecheck-web": "tsgo --project ./tsconfig.json --noEmit --watch"
   },
   "dependencies": {
     "@vscode/extension-telemetry": "^0.9.8"
