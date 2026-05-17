@@ -20633,6 +20633,12 @@ declare module 'vscode' {
 	 */
 	export interface LanguageModelChatCapabilities {
 		/**
+		 * Tokenizer identifier used by clients that need a local token counter.
+		 * Unknown or omitted values should be treated as implementation-defined by the client.
+		 */
+		readonly tokenizer?: string;
+
+		/**
 		 * Whether image input is supported by the model.
 		 * Common supported images are jpg and png, but each model will vary in supported mimetypes.
 		 */

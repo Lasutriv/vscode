@@ -56,6 +56,7 @@ export class OllamaBackend {
 					detail: '0x',
 					isUserSelectable: true,
 					capabilities: {
+						tokenizer: 'cl100k_base',
 						toolCalling: true,
 						agentMode: true,
 						editTools: ['multi-find-replace', 'find-replace'],
@@ -76,6 +77,7 @@ export class OllamaBackend {
 			detail: '0x',
 			isUserSelectable: true,
 			capabilities: {
+				tokenizer: 'cl100k_base',
 				toolCalling: true,
 				agentMode: true,
 				...(model.name.startsWith('devstral-small-2') && { imageInput: true, vision: true }),

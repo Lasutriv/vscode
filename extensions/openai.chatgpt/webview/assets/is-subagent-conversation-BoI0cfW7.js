@@ -1,0 +1,2 @@
+import{ma as e}from"./app-server-manager-signals-DO_PvY5P.js";function t(t){return e(t?.source)?.parentThreadId!=null}function n(e,n){return!n&&t(e)}export{n,t};
+//# sourceMappingURL=is-subagent-conversation-BoI0cfW7.js.map

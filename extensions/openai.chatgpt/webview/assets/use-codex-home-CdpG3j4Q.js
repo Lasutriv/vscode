@@ -1,0 +1,2 @@
+import{t as e}from"./compiler-runtime-DAZMUUJC.js";import{B as t}from"./vscode-api-B5Og2mOP.js";import{n}from"./thread-context-inputs-CXV_w0Qm.js";var r=e();function i(e){let i=(0,r.c)(2),a;return i[0]===e?a=i[1]:(a=e==null?void 0:{hostId:e},i[0]=e,i[1]=a),t(n,a)}function a(e){return i(e).data?.codexHome}export{i as n,a as t};
+//# sourceMappingURL=use-codex-home-CdpG3j4Q.js.map

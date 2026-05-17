@@ -1,0 +1,2 @@
+import{t as e}from"./compiler-runtime-DAZMUUJC.js";import{H as t,S as n,a as r,c as i}from"./vscode-api-B5Og2mOP.js";var a=r(n,`os-info`,{staleTime:i.INFINITE}),o=e();function s(){let e=(0,o.c)(3),n=t(a),r;return e[0]!==n.data||e[1]!==n.isLoading?(r={data:n.data,isLoading:n.isLoading},e[0]=n.data,e[1]=n.isLoading,e[2]=r):r=e[2],r}export{a as n,s as t};
+//# sourceMappingURL=use-os-info-BckH8EAC.js.map

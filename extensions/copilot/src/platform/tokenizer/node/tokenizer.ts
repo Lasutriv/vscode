@@ -20,13 +20,23 @@ import { TikTokenImpl } from './tikTokenizerImpl';
 export const ITokenizerProvider = createServiceIdentifier<ITokenizerProvider>('ITokenizerProvider');
 
 export interface TokenizationEndpoint {
-	readonly tokenizer: TokenizerType;
+	readonly tokenizer?: TokenizerType;
 }
 
 export interface ITokenizerProvider {
 	readonly _serviceBrand: undefined;
 
 	acquireTokenizer(endpoint: TokenizationEndpoint): ITokenizer;
+}
+
+export function resolveTokenizerType(endpoint: TokenizationEndpoint): TokenizerType {
+	switch (endpoint.tokenizer) {
+		case TokenizerType.CL100K:
+		case TokenizerType.O200K:
+			return endpoint.tokenizer;
+		default:
+			return TokenizerType.CL100K;
+	}
 }
 
 /**
@@ -73,13 +83,13 @@ export class TokenizerProvider implements ITokenizerProvider {
 	 * @param endpoint The endpoint you want to acquire a tokenizer for
 	 */
 	public acquireTokenizer(endpoint: TokenizationEndpoint): ITokenizer {
-		switch (endpoint.tokenizer) {
+		switch (resolveTokenizerType(endpoint)) {
 			case TokenizerType.CL100K:
 				return this._cl100kTokenizer.value;
 			case TokenizerType.O200K:
 				return this._o200kTokenizer.value;
 			default:
-				throw new Error(`Unknown tokenizer: ${endpoint.tokenizer}`);
+				return this._cl100kTokenizer.value;
 		}
 	}
 }

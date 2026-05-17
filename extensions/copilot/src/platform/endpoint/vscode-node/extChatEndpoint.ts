@@ -29,6 +29,13 @@ import { decodeStatefulMarker, encodeStatefulMarker, rawPartAsStatefulMarker } f
 import { rawPartAsThinkingData } from '../common/thinkingDataContainer';
 import { ExtensionContributedChatTokenizer } from './extChatTokenizer';
 
+type LanguageModelTokenizerMetadata = {
+	tokenizer?: unknown;
+	capabilities?: {
+		tokenizer?: unknown;
+	};
+};
+
 enum ChatImageMimeType {
 	PNG = 'image/png',
 	JPEG = 'image/jpeg',
@@ -91,8 +98,7 @@ export class ExtensionContributedChatEndpoint implements IChatEndpoint {
 	}
 
 	get tokenizer(): TokenizerType {
-		// Most language models use the O200K tokenizer, if they don't they should specify in their metadata
-		return TokenizerType.O200K;
+		return getLanguageModelTokenizer(this.languageModel);
 	}
 
 	get showInModelPicker(): boolean {
@@ -305,6 +311,15 @@ export class ExtensionContributedChatEndpoint implements IChatEndpoint {
 			maxInputTokens: modelMaxPromptTokens
 		});
 	}
+}
+
+function getLanguageModelTokenizer(languageModel: vscode.LanguageModelChat): TokenizerType {
+	const metadata = languageModel as vscode.LanguageModelChat & LanguageModelTokenizerMetadata;
+	const tokenizer = metadata.capabilities?.tokenizer ?? metadata.tokenizer;
+	if (tokenizer === TokenizerType.CL100K || tokenizer === TokenizerType.O200K) {
+		return tokenizer;
+	}
+	return TokenizerType.CL100K;
 }
 
 export function convertToApiChatMessage(messages: Raw.ChatMessage[]): Array<vscode.LanguageModelChatMessage | vscode.LanguageModelChatMessage2> {

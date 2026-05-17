@@ -1,0 +1,2 @@
+import{t as e}from"./compiler-runtime-DAZMUUJC.js";import{p as t}from"./vscode-api-B5Og2mOP.js";import{r as n}from"./remote-connection-visibility-BmKFNsQH.js";var r=e();function i(){let e=(0,r.c)(3),[i]=t(`remote_control_connections_state`),o=n(),s;return e[0]!==i||e[1]!==o?(s=a({remoteControlConnectionsState:i,slingshotEnabled:o}),e[0]=i,e[1]=o,e[2]=s):s=e[2],s}function a({remoteControlConnectionsState:e,slingshotEnabled:t}){return t&&(e?.available??!0)&&e?.accessRequired!==!0}export{i as t};
+//# sourceMappingURL=remote-control-connections-visibility-PewIFpU8.js.map

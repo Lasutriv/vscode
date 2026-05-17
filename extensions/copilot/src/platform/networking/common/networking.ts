@@ -52,8 +52,9 @@ export interface HeaderContributor {
 	contributeHeaderValues(headers: ReqHeaders): void;
 }
 
-// The maximum time to wait for a request to complete.
-const requestTimeoutMs = 30 * 1000; // 30 seconds
+// The maximum time to wait for a request to complete. Local agentic models with
+// very large contexts can take several minutes before the first token.
+const requestTimeoutMs = 10 * 60 * 1000; // 10 minutes
 
 
 /**

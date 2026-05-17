@@ -125,6 +125,11 @@ export class AgentPrompt extends PromptElement<AgentPromptProps> {
 			<SystemMessage>
 				<MemoryInstructionsPrompt />
 			</SystemMessage>
+			<SystemMessage>
+				Tool results are intermediate evidence, not completion. After any tool result, continue immediately with the next concrete action unless the user's request is fully resolved or you are genuinely blocked.<br />
+				Todo updates are bookkeeping only. A visible result like "Updated todo list" is not task completion. After calling a todo update tool such as update_todo, update_plan, or manage_todo_list, continue with the next concrete action in the same turn unless the user explicitly asked only for a plan or status update.<br />
+				Search, grep, file, directory, and terminal results must be consumed by using a concrete returned path, line, stdout, or error in the next action. Do not end the turn immediately after these tool results.
+			</SystemMessage>
 		</>;
 		const isAutopilot = this.props.promptContext.request?.permissionLevel === 'autopilot';
 		const sessionResource = this.props.promptContext.request?.sessionResource;

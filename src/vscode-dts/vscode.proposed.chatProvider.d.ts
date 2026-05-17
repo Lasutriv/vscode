@@ -81,6 +81,12 @@ declare module 'vscode' {
 
 	export interface LanguageModelChatCapabilities {
 		/**
+		 * Tokenizer identifier used by clients that need a local token counter.
+		 * Unknown or omitted values should be treated as implementation-defined by the client.
+		 */
+		readonly tokenizer?: string;
+
+		/**
 		 * The tools the model prefers for making file edits. If not provided or if none of the tools,
 		 * are recognized, the editor will try multiple edit tools and pick the best one. The available
 		 * edit tools WILL change over time and this capability only serves as a hint to the editor.

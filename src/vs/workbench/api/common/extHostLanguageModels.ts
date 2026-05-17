@@ -235,6 +235,7 @@ export class ExtHostLanguageModels implements ExtHostLanguageModelsShape {
 					targetChatSessionType: m.targetChatSessionType,
 					configurationSchema: m.configurationSchema as IJSONSchema | undefined,
 					capabilities: m.capabilities ? {
+						tokenizer: m.capabilities.tokenizer,
 						vision: m.capabilities.imageInput,
 						editTools: m.capabilities.editTools,
 						toolCalling: !!m.capabilities.toolCalling,
@@ -422,6 +423,7 @@ export class ExtHostLanguageModels implements ExtHostLanguageModelsShape {
 				cacheCost: model.metadata.cacheCost,
 				priceCategory: model.metadata.priceCategory,
 				capabilities: {
+					tokenizer: model.metadata.capabilities?.tokenizer,
 					supportsImageToText: model.metadata.capabilities?.vision ?? false,
 					supportsToolCalling: !!model.metadata.capabilities?.toolCalling,
 					editToolsHint: model.metadata.capabilities?.editTools,

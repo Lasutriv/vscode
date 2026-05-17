@@ -1,0 +1,2 @@
+import{Un as e}from"./src-DpdPyvGM.js";import{t}from"./use-global-state-CVUXZemP.js";import{t as n}from"./use-auth-Y4Cqys69.js";function r(){let{data:r,isLoading:i}=t(e.NUX_2025_09_15),{authMethod:a}=n();if(!i){if(r)return`none`;switch(a){case`chatgptAuthTokens`:case`chatgpt`:return`2025-09-15-full-chatgpt-auth`;case`apikey`:case`amazonBedrock`:case`agentIdentity`:case`copilot`:return`2025-09-15-apikey-auth`;case null:return`none`}}}export{r as t};
+//# sourceMappingURL=use-nux-CtqZv1B4.js.map

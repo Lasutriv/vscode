@@ -6,7 +6,7 @@
 import { createServiceIdentifier } from '../../../util/common/services';
 import { CancellationToken } from '../../../util/vs/base/common/cancellation';
 import { Uri } from '../../../vscodeTypes';
-import { ITokenizerProvider, TokenizationEndpoint } from '../../tokenizer/node/tokenizer';
+import { ITokenizerProvider, resolveTokenizerType, TokenizationEndpoint } from '../../tokenizer/node/tokenizer';
 import { FileChunk } from '../common/chunk';
 import { MAX_CHUNK_SIZE_TOKENS, NaiveChunker } from './naiveChunker';
 
@@ -51,13 +51,14 @@ export class NaiveChunkingService implements INaiveChunkingService {
 	}
 
 	private getNaiveChunker(endpoint: TokenizationEndpoint): NaiveChunker {
-		const cached = this.naiveChunkers.get(endpoint.tokenizer);
+		const tokenizer = resolveTokenizerType(endpoint);
+		const cached = this.naiveChunkers.get(tokenizer);
 		if (cached) {
 			return cached;
 		}
 
 		const chunker = new NaiveChunker(endpoint, this.tokenizerProvider);
-		this.naiveChunkers.set(endpoint.tokenizer, chunker);
+		this.naiveChunkers.set(tokenizer, chunker);
 		return chunker;
 	}
 
@@ -70,4 +71,3 @@ export class NaiveChunkingService implements INaiveChunkingService {
 		}
 	}
 }
-

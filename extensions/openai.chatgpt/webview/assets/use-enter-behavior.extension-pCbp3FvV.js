@@ -1,0 +1,2 @@
+import{Xr as e}from"./src-DpdPyvGM.js";import{t}from"./compiler-runtime-DAZMUUJC.js";import{r as n}from"./use-configuration-B5GvVwco.js";var r=t();function i(){let t=(0,r.c)(3),{data:i,isLoading:a}=n(e.COMPOSER_ENTER_BEHAVIOR),o=i??`enter`,s;return t[0]!==a||t[1]!==o?(s={enterBehavior:o,isLoading:a},t[0]=a,t[1]=o,t[2]=s):s=t[2],s}export{i as t};
+//# sourceMappingURL=use-enter-behavior.extension-pCbp3FvV.js.map

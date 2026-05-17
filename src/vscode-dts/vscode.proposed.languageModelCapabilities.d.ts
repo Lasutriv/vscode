@@ -13,6 +13,11 @@ declare module 'vscode' {
 		 */
 		readonly capabilities: {
 			/**
+			 * Tokenizer identifier used by clients that need a local token counter.
+			 */
+			readonly tokenizer?: string;
+
+			/**
 			 * Whether the language model supports tool calling.
 			 */
 			readonly supportsToolCalling: boolean;

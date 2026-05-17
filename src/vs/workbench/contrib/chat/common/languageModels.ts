@@ -214,6 +214,7 @@ export interface ILanguageModelChatMetadata {
 		readonly accountLabel?: string;
 	};
 	readonly capabilities?: {
+		readonly tokenizer?: string;
 		readonly vision?: boolean;
 		readonly toolCalling?: boolean;
 		readonly agentMode?: boolean;

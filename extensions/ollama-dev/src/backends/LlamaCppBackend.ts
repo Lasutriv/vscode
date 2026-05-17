@@ -176,6 +176,7 @@ export class LlamaCppBackend {
 			detail: '0x',
 			isUserSelectable: true,
 			capabilities: {
+				tokenizer: 'cl100k_base',
 				toolCalling: true,
 				agentMode: true,
 				editTools: ['multi-find-replace', 'find-replace'],

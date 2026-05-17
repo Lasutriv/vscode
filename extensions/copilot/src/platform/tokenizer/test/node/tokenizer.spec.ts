@@ -24,4 +24,14 @@ suite('Tokenization', function () {
 		const tokens = await multiModelTokenizer.acquireTokenizer({ tokenizer: TokenizerType.O200K }).tokenLength('functionfibonacci(n:number):number{if(n<=0){return0;}elseif(n==1){return1;}else{returnfibonacci(n-1)+fibonacci(n-2);}}');
 		assert.deepStrictEqual(tokens, 39);
 	});
+
+	test('Falls back to CL100K when tokenizer metadata is missing', async function () {
+		const tokens = await multiModelTokenizer.acquireTokenizer({}).tokenLength('Hello world!');
+		assert.deepStrictEqual(tokens, 3);
+	});
+
+	test('Falls back to CL100K when tokenizer metadata is unknown', async function () {
+		const tokens = await multiModelTokenizer.acquireTokenizer({ tokenizer: 'qwen' as TokenizerType }).tokenLength('Hello world!');
+		assert.deepStrictEqual(tokens, 3);
+	});
 });
